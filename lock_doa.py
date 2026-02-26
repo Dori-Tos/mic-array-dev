@@ -20,3 +20,8 @@ def lock_doa(angle=0):
 
 if __name__ == "__main__":
     lock_doa(angle=0)
+    
+    if KeyboardInterrupt:
+        if dev:
+            Mic_tuning = Tuning(dev)
+            Mic_tuning.unlock_doa
