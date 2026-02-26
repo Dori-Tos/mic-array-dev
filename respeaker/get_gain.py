@@ -4,6 +4,7 @@ import numpy as np
 import math
 import sounddevice
 import time
+from datetime import datetime
 
 
 def get_gain(device_index=1):  # Card2 device 0 Index 1
@@ -97,7 +98,13 @@ if __name__ == '__main__':
     with open('data/respeaker_gain_measurements.txt', 'w') as f:
         gain_info = get_gain()
         if gain_info:
-            f.write(f"Measurement {time.time()}:\n")
-            for key, value in gain_info.items():
-                f.write(f"  {key}: {value}\n")
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+            f.write(f"Measurement {timestamp}:\n")
+            f.write(f"AGC Gain (applied): {gain_info['agc_gain']:.2f} (dB: {gain_info['agc_gain_db']:.2f})")
+            f.write(f"AGC Max Gain: {gain_info['agc_max_gain']:.2f}")
+            f.write(f"AGC Desired Level: {gain_info['agc_desired_level']:.6f}")
+            f.write(f"DOA Angle: {gain_info['doa_angle']}°")
+            f.write(f"Voice Activity: {'Yes' if gain_info['voice_activity'] else 'No'} ({gain_info['voice_activity']})")
+            f.write(f"RMS Level: {gain_info['rms_level']:.2f} ({gain_info['rms_dbfs']:.2f} dBFS)")
+            f.write(f"Peak Level: {gain_info['peak_level']:.2f} ({gain_info['peak_dbfs']:.2f} dBFS)")
             f.write("\n")
