@@ -2,6 +2,7 @@ numpy
 matplotlib
 scipy
 
+pyusb
 pyaudio
 sounddevice
 
