@@ -6,7 +6,7 @@ import sounddevice
 import time
 
 
-def get_gain(device_index=2):  # Card2 device 0
+def get_gain(device_index=1):  # Card2 device 0 Index 1
     # Find the Respeaker 4 mic array USB device
     mic_array = usb.core.find(idVendor=0x2886, idProduct=0x0018)
     
@@ -93,4 +93,4 @@ def get_gain(device_index=2):  # Card2 device 0
 if __name__ == '__main__':
     print("Reading gain and DOA from Respeaker 4 mic array...")
     print("-" * 50)
-    get_gain()  # Uses Card2 device 0 (index 2) by default
+    get_gain()  # Uses Card2 device 0 (index 1) by default
