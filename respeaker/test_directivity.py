@@ -62,7 +62,7 @@ def test_directivity(
     measurements = []
     
     # Get timestamp for this test run
-    test_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    test_timestamp = datetime.now().strftime("%Y-%m-%d %H%:M%S")
     
     print("\nStarting measurements...")
     print("Press Ctrl+C to stop early\n")
