@@ -3,23 +3,7 @@ import usb.core
 import pyaudio
 import numpy as np
 import math
-import os
-import sys
-from contextlib import contextmanager
-
-
-@contextmanager
-def suppress_alsa_errors():
-    """Suppress ALSA error messages on Linux"""
-    # Save the original stderr
-    original_stderr = sys.stderr
-    # Redirect stderr to devnull
-    try:
-        sys.stderr = open(os.devnull, 'w')
-        yield
-    finally:
-        # Restore stderr
-        sys.stderr = original_stderr
+import sounddevice
 
 
 def get_gain(device_index=2):  # Card2 device 0
@@ -65,10 +49,7 @@ def get_gain(device_index=2):  # Card2 device 0
         # Now measure the actual audio signal level
         print(f"Sampling audio for {SAMPLE_DURATION}s to measure real signal level...")
         
-        # Suppress ALSA warnings during PyAudio initialization
-        with suppress_alsa_errors():
-            p = pyaudio.PyAudio()
-        
+        p = pyaudio.PyAudio()
         stream = p.open(
             rate=RESPEAKER_RATE,
             format=p.get_format_from_width(RESPEAKER_WIDTH),
