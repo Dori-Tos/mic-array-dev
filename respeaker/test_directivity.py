@@ -14,7 +14,8 @@ def test_directivity(
     seconds_per_rotation=90,  # Time for one complete rotation in seconds
     device_index=1,  # Audio device index
     sample_duration=0.5,  # Audio sample duration in seconds
-    output_dir='data/directivity'
+    output_dir='data/directivity',
+    save_peaks=False
 ):
     """
     Perform directivity measurements of the ReSpeaker mic array.
@@ -106,19 +107,34 @@ def test_directivity(
             peak_dbfs = 20 * math.log10(peak / full_scale) if peak > 0 else -float('inf')
             
             # Store measurement
-            measurement = {
-                'measurement_index': i,
-                'expected_angle': expected_angle,
-                'timestamp': datetime.now().isoformat(),
-                'doa_angle': doa_angle,
-                'agc_gain': agc_gain,
-                'agc_gain_db': agc_gain_db,
-                'voice_activity': voice_activity,
-                'rms_level': rms,
-                'rms_dbfs': rms_dbfs,
-                'peak_level': peak,
-                'peak_dbfs': peak_dbfs
-            }
+            if save_peaks:
+                measurement = {
+                    'measurement_index': i,
+                    'expected_angle': expected_angle,
+                    'timestamp': datetime.now().isoformat(),
+                    'doa_angle': doa_angle,
+                    'agc_gain': agc_gain,
+                    'agc_gain_db': agc_gain_db,
+                    'voice_activity': voice_activity,
+                    'rms_level': rms,
+                    'rms_dbfs': rms_dbfs,
+                    'peaks': True,
+                    'peak_level': peak,
+                    'peak_dbfs': peak_dbfs
+                }
+            else:
+                measurement = {
+                    'measurement_index': i,
+                    'expected_angle': expected_angle,
+                    'timestamp': datetime.now().isoformat(),
+                    'doa_angle': doa_angle,
+                    'agc_gain': agc_gain,
+                    'agc_gain_db': agc_gain_db,
+                    'voice_activity': voice_activity,
+                    'rms_level': rms,
+                    'rms_dbfs': rms_dbfs,
+                    'peaks': False
+                }
             measurements.append(measurement)
             
             # Progress report
@@ -136,10 +152,9 @@ def test_directivity(
     except KeyboardInterrupt:
         print("\n\nMeasurement interrupted by user")
     
-    # Convert to DataFrame
+    # Convert to Pandas DataFrame for optimized storage
     df = pd.DataFrame(measurements)
     
-    # Save data in multiple formats
     csv_file = output_path / f"directivity_{test_timestamp}.csv"
     
     df.to_csv(csv_file, index=False)
@@ -168,6 +183,8 @@ if __name__ == '__main__':
                         help='Audio sample duration in seconds (default: 0.5)')
     parser.add_argument('--output', type=str, default='data/directivity',
                         help='Output directory (default: data/directivity)')
+    parser.add_argument('--save-peaks', action='store_true',
+                        help='Save peak measurements (default: False)')
     
     args = parser.parse_args()
     
@@ -176,5 +193,6 @@ if __name__ == '__main__':
         seconds_per_rotation=args.rotation_time,
         device_index=args.device,
         sample_duration=args.duration,
-        output_dir=args.output
+        output_dir=args.output,
+        save_peaks=args.save_peaks
     )
