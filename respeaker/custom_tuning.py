@@ -143,6 +143,22 @@ class Tuning:
         return self.dev.ctrl_transfer(
             usb.util.CTRL_IN | usb.util.CTRL_TYPE_VENDOR | usb.util.CTRL_RECIPIENT_DEVICE,
             0, 0x80, 0, 1, self.TIMEOUT)[0]
+        
+    @property
+    def activate_stationary_noise_suppression(self):
+        self.write('STATNOISEONOFF', 1)
+        
+    @property
+    def deactivate_stationary_noise_suppression(self):
+        self.write('STATNOISEONOFF', 0)
+        
+    @property
+    def activate_non_stationary_noise_suppression(self):
+        self.write('NONSTATNOISEONOFF', 1)
+        
+    @property
+    def deactivate_non_stationary_noise_suppression(self):
+        self.write('NONSTATNOISEONOFF', 0)
 
     def close(self):
         """

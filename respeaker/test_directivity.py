@@ -13,7 +13,8 @@ def test_directivity(
     resolution=36,  # Number of measurement points (36 = 10° steps)
     seconds_per_rotation=90,  # Time for one complete rotation in seconds
     device_index=1,  # Audio device index
-    sample_duration=0.5,  # Audio sample duration in seconds
+    sample_duration=2.0,  # Audio sample duration in seconds
+    rotation_direction='counterclockwise',  # Rotation direction
     output_dir='data/directivity',
     save_peaks=False
 ):
@@ -25,7 +26,9 @@ def test_directivity(
         seconds_per_rotation: Time for one complete turntable rotation (seconds)
         device_index: Audio device index for ReSpeaker
         sample_duration: Duration to record audio at each point (needed to calculate RMS/Peak levels)
+        rotation_direction: Direction of turntable rotation ('clockwise' or 'counterclockwise')
         output_dir: Directory to save measurement data
+        save_peaks: Whether to save peak measurements
     
     Returns:
         DataFrame with measurements
@@ -42,6 +45,7 @@ def test_directivity(
     print(f"Directivity Test Configuration:")
     print(f"  Resolution: {resolution} points ({degrees_per_measurement:.1f}° per measurement)")
     print(f"  Turntable speed: {seconds_per_rotation} seconds/rotation")
+    print(f"  Rotation direction: {rotation_direction}")
     print(f"  Measurement interval: {interval:.2f} seconds")
     print(f"  Sample duration: {sample_duration} seconds")
     print(f"  Total test duration: ~{resolution * interval / 60:.1f} minutes")
@@ -63,7 +67,7 @@ def test_directivity(
     measurements = []
     
     # Get timestamp for this test run
-    test_timestamp = datetime.now().strftime("%Y-%m-%d %H%:M%S")
+    test_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     
     print("\nStarting measurements...")
     print("Press Ctrl+C to stop early\n")
@@ -73,7 +77,10 @@ def test_directivity(
             measurement_start = time.time()
             
             # Expected angle based on position (assuming starting at 0°)
-            expected_angle = (i * degrees_per_measurement) % 360
+            if rotation_direction == 'clockwise':
+                expected_angle = (i * degrees_per_measurement) % 360
+            else:
+                expected_angle = (360 - (i * degrees_per_measurement)) % 360
             
             # Read tuning parameters
             tuning = Tuning(mic_array)
@@ -177,10 +184,12 @@ if __name__ == '__main__':
                         help='Number of measurement points (default: 36)')
     parser.add_argument('--rotation-time', type=float, default=90.0,
                         help='Time for one rotation in seconds (default: 90.0)')
-    parser.add_argument('--device', type=int, default=1,
+    parser.add_argument('--device', type=int, default=0,
                         help='Audio device index (default: 1)')
-    parser.add_argument('--duration', type=float, default=0.5,
-                        help='Audio sample duration in seconds (default: 0.5)')
+    parser.add_argument('--duration', type=float, default=2.0,
+                        help='Audio sample duration in seconds (default: 2.0)')
+    parser.add_argument('--rotation-direction', type=str, choices=['clockwise', 'counterclockwise'], default='counterclockwise',
+                        help='Direction of turntable rotation (default: counterclockwise)')
     parser.add_argument('--output', type=str, default='data/directivity',
                         help='Output directory (default: data/directivity)')
     parser.add_argument('--save-peaks', action='store_true',
@@ -188,11 +197,22 @@ if __name__ == '__main__':
     
     args = parser.parse_args()
     
+    config = {
+        'resolution': args.resolution,
+        'seconds_per_rotation': args.rotation_time,
+        'device_index': args.device,
+        'sample_duration': args.duration,
+        'rotation_direction': args.rotation_direction,
+        'output_dir': args.output,
+        'save_peaks': args.save_peaks
+    }
+    
     test_directivity(
-        resolution=args.resolution,
-        seconds_per_rotation=args.rotation_time,
-        device_index=args.device,
-        sample_duration=args.duration,
-        output_dir=args.output,
-        save_peaks=args.save_peaks
+        resolution=config['resolution'],
+        seconds_per_rotation=config['seconds_per_rotation'],
+        device_index=config['device_index'],
+        sample_duration=config['sample_duration'],
+        rotation_direction=config['rotation_direction'],
+        output_dir=config['output_dir'],
+        save_peaks=config['save_peaks']
     )
