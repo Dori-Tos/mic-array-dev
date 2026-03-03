@@ -16,7 +16,9 @@ def test_directivity(
     sample_duration=2.0,  # Audio sample duration in seconds
     rotation_direction='counterclockwise',  # Rotation direction
     output_dir='data/directivity',
-    save_peaks=False
+    save_peaks=False,
+    signal_type='burst',  # Type of test signal ('burst' or 'continuous')
+    burst_period=0.4  # Duration of burst signal in seconds (if signal_type='burst')
 ):
     """
     Perform directivity measurements of the ReSpeaker mic array.
@@ -29,6 +31,8 @@ def test_directivity(
         rotation_direction: Direction of turntable rotation ('clockwise' or 'counterclockwise')
         output_dir: Directory to save measurement data
         save_peaks: Whether to save peak measurements
+        signal_type: Type of test signal ('burst' for short bursts, 'continuous' for steady tone)
+        burst_period: Duration of each burst in seconds (only used if signal_type='burst')
     
     Returns:
         DataFrame with measurements
@@ -105,7 +109,30 @@ def test_directivity(
             
             # Process audio
             audio_data = audio_data.flatten()
-            rms = np.sqrt(np.mean(audio_data**2))
+            
+            if signal_type == 'burst':
+                # For burst signals: Calculate RMS in sliding windows to find peak RMS during active burst
+                window_size = int(0.05 * RESPEAKER_RATE)  # 50ms window
+                num_windows = len(audio_data) - window_size + 1
+
+                if num_windows > 0:
+                    # Calculate RMS for each window
+                    window_rms = np.array([
+                        np.sqrt(np.mean(audio_data[i:i+window_size]**2))
+                        for i in range(0, num_windows, window_size // 4)  # 25% overlap
+                    ])
+
+                    # Use the maximum RMS window (captures the burst peak)
+                    rms = np.max(window_rms)
+                else:
+                    # Fallback for very short samples
+                    rms = np.sqrt(np.mean(audio_data**2))
+                    
+            else:
+                # For continuous signals: Calculate overall RMS
+                rms = np.sqrt(np.mean(audio_data**2))
+
+            # Peak value
             peak = np.max(np.abs(audio_data))
             
             # Convert to dBFS
@@ -194,7 +221,11 @@ if __name__ == '__main__':
                         help='Output directory (default: data/directivity)')
     parser.add_argument('--save-peaks', action='store_true',
                         help='Save peak measurements (default: False)')
-    
+    parser.add_argument('--signal-type', type=str, choices=['burst', 'continuous'], default='burst',
+                        help='Type of test signal (default: burst)')
+    parser.add_argument('--burst-period', type=float, default=0.4,
+                        help='Duration of burst signal in seconds (default: 0.4, only used if signal-type is burst)')
+   
     args = parser.parse_args()
     
     config = {
@@ -204,8 +235,25 @@ if __name__ == '__main__':
         'sample_duration': args.duration,
         'rotation_direction': args.rotation_direction,
         'output_dir': args.output,
-        'save_peaks': args.save_peaks
+        'save_peaks': args.save_peaks,
+        'signal_type': args.signal_type,
+        'burst_period': args.burst_period
     }
+    
+    # Recommanded settings for Measurements:
+    # 1:
+    #   - resolution: 36 (10° steps)
+    #   - rotation_time: 90 seconds (1.5 minutes per rotation)
+    #   - sample_duration: 2 seconds (enough to capture burst and calculate RMS/Peak)
+    #   => 2.5 seconds per measurement
+    # = sudo .venv/bin/python3 respeaker/test_directivity.py --resolution 36 --rotation-time 90 --duration 2
+    
+    # 2:
+    #   - resolution: 72 (5° steps)
+    #   - rotation_time: 180 seconds (3 minutes per rotation)
+    #   - sample_duration: 2 second 
+    #   => 2.5 seconds per measurement
+    # = sudo .venv/bin/python3 respeaker/test_directivity.py --resolution 72 --rotation-time 180 --duration 2
     
     test_directivity(
         resolution=config['resolution'],
@@ -214,5 +262,7 @@ if __name__ == '__main__':
         sample_duration=config['sample_duration'],
         rotation_direction=config['rotation_direction'],
         output_dir=config['output_dir'],
-        save_peaks=config['save_peaks']
+        save_peaks=config['save_peaks'],
+        signal_type=config['signal_type'],
+        burst_period=config['burst_period']
     )
