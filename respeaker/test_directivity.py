@@ -18,7 +18,9 @@ def test_directivity(
     output_dir='data/directivity',
     save_peaks=False,
     signal_type='burst',  # Type of test signal ('burst' or 'continuous')
-    burst_period=0.4  # Duration of burst signal in seconds (if signal_type='burst')
+    burst_period=0.4,  # Duration of burst signal in seconds (if signal_type='burst')
+    doa_locked=True,  # Whether the beamformer is locked during measurements (default: True)
+    doa_lock_angle=0  # Angle the DOA is locked at (default: 0°)
 ):
     """
     Perform directivity measurements of the ReSpeaker mic array.
@@ -33,6 +35,8 @@ def test_directivity(
         save_peaks: Whether to save peak measurements
         signal_type: Type of test signal ('burst' for short bursts, 'continuous' for steady tone)
         burst_period: Duration of each burst in seconds (only used if signal_type='burst')
+        doa_locked: Whether to lock the beamformer during measurements (default: True)
+        doa_lock_angle: Angle to lock the DOA at if locking is enabled (default: 0°)
     
     Returns:
         DataFrame with measurements
@@ -77,14 +81,14 @@ def test_directivity(
     print("Press Ctrl+C to stop early\n")
     
     try:
-        for i in range(resolution):
+        for meas_idx in range(resolution):
             measurement_start = time.time()
             
             # Expected angle based on position (assuming starting at 0°)
             if rotation_direction == 'clockwise':
-                expected_angle = (i * degrees_per_measurement) % 360
+                expected_angle = (meas_idx * degrees_per_measurement) % 360
             else:
-                expected_angle = (360 - (i * degrees_per_measurement)) % 360
+                expected_angle = (360 - (meas_idx * degrees_per_measurement)) % 360
             
             # Read tuning parameters
             tuning = Tuning(mic_array)
@@ -113,17 +117,17 @@ def test_directivity(
             if signal_type == 'burst':
                 # For burst signals: Calculate RMS in sliding windows to find peak RMS during active burst
                 window_size = int(0.05 * RESPEAKER_RATE)  # 50ms window
-                num_windows = len(audio_data) - window_size + 1
-
-                if num_windows > 0:
-                    # Calculate RMS for each window
-                    window_rms = np.array([
-                        np.sqrt(np.mean(audio_data[i:i+window_size]**2))
-                        for i in range(0, num_windows, window_size // 4)  # 25% overlap
-                    ])
-
+                hop_size = max(1, window_size // 4)  # 25% overlap, minimum 1
+                
+                # Calculate RMS for each window
+                window_rms_values = []
+                for i in range(0, len(audio_data) - window_size + 1, hop_size):
+                    window = audio_data[i:i+window_size]
+                    window_rms_values.append(np.sqrt(np.mean(window**2)))
+                
+                if window_rms_values:
                     # Use the maximum RMS window (captures the burst peak)
-                    rms = np.max(window_rms)
+                    rms = max(window_rms_values)
                 else:
                     # Fallback for very short samples
                     rms = np.sqrt(np.mean(audio_data**2))
@@ -135,18 +139,32 @@ def test_directivity(
             # Peak value
             peak = np.max(np.abs(audio_data))
             
-            # Convert to dBFS
+            # Convert to dBFS with noise floor protection
             full_scale = 32768.0
-            rms_dbfs = 20 * math.log10(rms / full_scale) if rms > 0 else -float('inf')
-            peak_dbfs = 20 * math.log10(peak / full_scale) if peak > 0 else -float('inf')
+            min_level = 1e-10  # Minimum level to avoid log(0)
+            
+            rms = max(rms, min_level)  # Apply noise floor
+            peak = max(peak, min_level)
+            
+            rms_dbfs = 20 * math.log10(rms / full_scale)
+            peak_dbfs = 20 * math.log10(peak / full_scale)
+            
+            # Calculate relative angle (source angle relative to locked beamformer direction)
+            if doa_locked:
+                # Relative angle = how far the source is from the beamformer's locked direction
+                relative_angle = (expected_angle - doa_lock_angle) % 360
+            else:
+                relative_angle = None
             
             # Store measurement
             if save_peaks:
                 measurement = {
-                    'measurement_index': i,
+                    'measurement_index': meas_idx,
                     'expected_angle': expected_angle,
+                    'relative_angle': relative_angle,
                     'timestamp': datetime.now().isoformat(),
                     'doa_angle': doa_angle,
+                    'locked_doa': doa_lock_angle if doa_locked else None,
                     'agc_gain': agc_gain,
                     'agc_gain_db': agc_gain_db,
                     'voice_activity': voice_activity,
@@ -158,10 +176,12 @@ def test_directivity(
                 }
             else:
                 measurement = {
-                    'measurement_index': i,
+                    'measurement_index': meas_idx,
                     'expected_angle': expected_angle,
+                    'relative_angle': relative_angle,
                     'timestamp': datetime.now().isoformat(),
                     'doa_angle': doa_angle,
+                    'locked_doa': doa_lock_angle if doa_locked else None,
                     'agc_gain': agc_gain,
                     'agc_gain_db': agc_gain_db,
                     'voice_activity': voice_activity,
@@ -172,10 +192,17 @@ def test_directivity(
             measurements.append(measurement)
             
             # Progress report
-            print(f"[{i+1}/{resolution}] Angle: {expected_angle:6.1f}° | "
-                  f"DOA: {doa_angle:3d}° | "
-                  f"RMS: {rms_dbfs:6.1f} dBFS | "
-                  f"Peak: {peak_dbfs:6.1f} dBFS")
+            if doa_locked and relative_angle is not None:
+                print(f"[{meas_idx+1}/{resolution}] Angle: {expected_angle:6.1f}° | "
+                      f"Relative: {relative_angle:6.1f}° | "
+                      f"DOA: {doa_angle:3d}° (locked) | "
+                      f"RMS: {rms_dbfs:6.1f} dBFS | "
+                      f"Peak: {peak_dbfs:6.1f} dBFS")
+            else:
+                print(f"[{meas_idx+1}/{resolution}] Angle: {expected_angle:6.1f}° | "
+                      f"DOA: {doa_angle:3d}° | "
+                      f"RMS: {rms_dbfs:6.1f} dBFS | "
+                      f"Peak: {peak_dbfs:6.1f} dBFS")
             
             # Wait for next measurement (accounting for processing time)
             elapsed = time.time() - measurement_start
@@ -225,6 +252,10 @@ if __name__ == '__main__':
                         help='Type of test signal (default: burst)')
     parser.add_argument('--burst-period', type=float, default=0.4,
                         help='Duration of burst signal in seconds (default: 0.4, only used if signal-type is burst)')
+    parser.add_argument('--doa-locked', action='store_true',
+                        help='Lock the beamformer during measurements (default: False)')
+    parser.add_argument('--doa-lock-angle', type=int, default=0,
+                        help='Angle to lock the DOA at if locking is enabled (default: 0°)')
    
     args = parser.parse_args()
     
@@ -237,7 +268,9 @@ if __name__ == '__main__':
         'output_dir': args.output,
         'save_peaks': args.save_peaks,
         'signal_type': args.signal_type,
-        'burst_period': args.burst_period
+        'burst_period': args.burst_period,
+        'doa_locked': args.doa_locked,
+        'doa_lock_angle': args.doa_lock_angle
     }
     
     # Recommanded settings for Measurements:
@@ -264,5 +297,7 @@ if __name__ == '__main__':
         output_dir=config['output_dir'],
         save_peaks=config['save_peaks'],
         signal_type=config['signal_type'],
-        burst_period=config['burst_period']
+        burst_period=config['burst_period'],
+        doa_locked=config['doa_locked'],
+        doa_lock_angle=config['doa_lock_angle']
     )

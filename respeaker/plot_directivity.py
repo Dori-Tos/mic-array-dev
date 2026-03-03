@@ -17,6 +17,11 @@ def plot_directivity(csv_file, save_plot=True, save_location=None):
     # Load data
     df = pd.read_csv(csv_file)
     
+    # Check if relative_angle is available (when beamformer is locked)
+    use_relative_angle = 'relative_angle' in df.columns and df['relative_angle'].notna().any()
+    angle_column = 'relative_angle' if use_relative_angle else 'expected_angle'
+    angle_label = 'Relative Angle (from locked DOA)' if use_relative_angle else 'Angle'
+    
     peaks_available = 'peaks' in df.columns and df['peaks'].any()
     
     if peaks_available:
@@ -27,7 +32,7 @@ def plot_directivity(csv_file, save_plot=True, save_location=None):
 
         # Main polar plot for RMS level
         ax1 = plt.subplot(221, projection='polar')
-        angles_rad = np.deg2rad(df['expected_angle'])
+        angles_rad = np.deg2rad(df[angle_column])
         ax1.plot(angles_rad, df['rms_dbfs'], 'b-o', linewidth=2, markersize=4, label='RMS')
         ax1.set_theta_zero_location('N')
         ax1.set_theta_direction(-1)
@@ -46,24 +51,32 @@ def plot_directivity(csv_file, save_plot=True, save_location=None):
 
         # Cartesian plot comparing RMS and Peak
         ax3 = plt.subplot(223)
-        ax3.plot(df['expected_angle'], df['rms_dbfs'], 'b-o', linewidth=2, markersize=4, label='RMS')
-        ax3.plot(df['expected_angle'], df['peak_dbfs'], 'r-s', linewidth=2, markersize=4, label='Peak')
-        ax3.set_xlabel('Angle (degrees)', fontsize=10)
+        ax3.plot(df[angle_column], df['rms_dbfs'], 'b-o', linewidth=2, markersize=4, label='RMS')
+        ax3.plot(df[angle_column], df['peak_dbfs'], 'r-s', linewidth=2, markersize=4, label='Peak')
+        ax3.set_xlabel(f'{angle_label} (degrees)', fontsize=10)
         ax3.set_ylabel('Level (dBFS)', fontsize=10)
         ax3.set_title('Signal Levels vs Angle', fontsize=12, fontweight='bold')
         ax3.grid(True, alpha=0.3)
         ax3.legend()
         ax3.set_xlim([0, 360])
 
-        # DOA angle plot
+        # DOA angle plot (or relative angle plot if beamformer is locked)
         ax4 = plt.subplot(224)
-        ax4.plot(df['expected_angle'], df['doa_angle'], 'g-^', linewidth=2, markersize=4)
-        ax4.set_xlabel('Expected Angle (degrees)', fontsize=10)
-        ax4.set_ylabel('Detected DOA Angle (degrees)', fontsize=10)
-        ax4.set_title('Direction of Arrival Detection', fontsize=12, fontweight='bold')
-        ax4.grid(True, alpha=0.3)
-        ax4.set_xlim([0, 360])
-        ax4.set_ylim([0, 360])
+        if use_relative_angle:
+            ax4.plot(df[angle_column], df['rms_dbfs'], 'b-o', linewidth=2, markersize=4)
+            ax4.set_xlabel(f'{angle_label} (degrees)', fontsize=10)
+            ax4.set_ylabel('RMS Level (dBFS)', fontsize=10)
+            ax4.set_title('Directivity Pattern (Relative to Locked DOA)', fontsize=12, fontweight='bold')
+            ax4.grid(True, alpha=0.3)
+            ax4.set_xlim([0, 360])
+        else:
+            ax4.plot(df['expected_angle'], df['doa_angle'], 'g-^', linewidth=2, markersize=4)
+            ax4.set_xlabel('Expected Angle (degrees)', fontsize=10)
+            ax4.set_ylabel('Detected DOA Angle (degrees)', fontsize=10)
+            ax4.set_title('Direction of Arrival Detection', fontsize=12, fontweight='bold')
+            ax4.grid(True, alpha=0.3)
+            ax4.set_xlim([0, 360])
+            ax4.set_ylim([0, 360])
 
         # Add overall title with metadata
         test_name = Path(csv_file).stem
@@ -89,11 +102,14 @@ def plot_directivity(csv_file, save_plot=True, save_location=None):
         # Create figure with single polar plot for RMS level
         fig = plt.figure(figsize=(8, 6))
         ax1 = plt.subplot(111, projection='polar')
-        angles_rad = np.deg2rad(df['expected_angle'])
+        angles_rad = np.deg2rad(df[angle_column])
         ax1.plot(angles_rad, df['rms_dbfs'], 'b-o', linewidth=2, markersize=4)
         ax1.set_theta_zero_location('N')
         ax1.set_theta_direction(-1)
-        ax1.set_title('RMS Level (dBFS)', pad=20, fontsize=12, fontweight='bold')
+        title = 'RMS Level (dBFS)'
+        if use_relative_angle:
+            title += ' - Relative to Locked DOA'
+        ax1.set_title(title, pad=20, fontsize=12, fontweight='bold')
         ax1.grid(True)
 
         # Add overall title with metadata
@@ -120,15 +136,17 @@ def plot_directivity(csv_file, save_plot=True, save_location=None):
     print("="*60)
     print(f"RMS Level:")
     print(f"  Mean:   {df['rms_dbfs'].mean():.2f} dBFS")
-    print(f"  Min:    {df['rms_dbfs'].min():.2f} dBFS at {df.loc[df['rms_dbfs'].idxmin(), 'expected_angle']:.1f}°")
-    print(f"  Max:    {df['rms_dbfs'].max():.2f} dBFS at {df.loc[df['rms_dbfs'].idxmax(), 'expected_angle']:.1f}°")
+    print(f"  Min:    {df['rms_dbfs'].min():.2f} dBFS at {df.loc[df['rms_dbfs'].idxmin(), angle_column]:.1f}°")
+    print(f"  Max:    {df['rms_dbfs'].max():.2f} dBFS at {df.loc[df['rms_dbfs'].idxmax(), angle_column]:.1f}°")
     print(f"  Range:  {df['rms_dbfs'].max() - df['rms_dbfs'].min():.2f} dB")
     if peaks_available:
         print(f"\nPeak Level:")
         print(f"  Mean:   {df['peak_dbfs'].mean():.2f} dBFS")
-        print(f"  Min:    {df['peak_dbfs'].min():.2f} dBFS at {df.loc[df['peak_dbfs'].idxmin(), 'expected_angle']:.1f}°")
-        print(f"  Max:    {df['peak_dbfs'].max():.2f} dBFS at {df.loc[df['peak_dbfs'].idxmax(), 'expected_angle']:.1f}°")
+        print(f"  Min:    {df['peak_dbfs'].min():.2f} dBFS at {df.loc[df['peak_dbfs'].idxmin(), angle_column]:.1f}°")
+        print(f"  Max:    {df['peak_dbfs'].max():.2f} dBFS at {df.loc[df['peak_dbfs'].idxmax(), angle_column]:.1f}°")
         print(f"  Range:  {df['peak_dbfs'].max() - df['peak_dbfs'].min():.2f} dB")
+    if use_relative_angle:
+        print(f"\nBeamformer locked at: {df['locked_doa'].iloc[0]:.0f}°")
     print("="*60)
 
 
