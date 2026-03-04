@@ -15,8 +15,9 @@ def test_directivity_multipass(
     seconds_per_rotation=90,  # Time for one complete rotation in seconds
     device_index=1,  # Audio device index
     sample_duration=2.0,  # Audio sample duration in seconds
-    output_dir='data/directivity',
-    doa_lock_angle=180  # Angle the DOA is locked at
+    output_dir='data/directivity_multipass',
+    doa_lock_angle=180,  # Angle the DOA is locked at
+    wait_between_passes=False  # Wait for Enter key before starting next pass
 ):
     """
     Perform multi-pass directivity measurements of the ReSpeaker mic array.
@@ -31,6 +32,7 @@ def test_directivity_multipass(
         sample_duration: Duration to record audio at each point (seconds)
         output_dir: Directory to save measurement data
         doa_lock_angle: Angle to lock the DOA at (default: 180°)
+        wait_between_passes: If True, wait for Enter key before starting next pass
     
     Returns:
         DataFrame with averaged measurements
@@ -83,6 +85,11 @@ def test_directivity_multipass(
             print(f"\n{'='*70}")
             print(f"PASS {pass_num + 1}/{num_passes} - Direction: {rotation_direction.upper()}")
             print(f"{'='*70}\n")
+            
+            # Wait for user input before starting this pass (except for the first pass)
+            if wait_between_passes and pass_num > 0:
+                input(f"Press Enter to start pass {pass_num + 1}/{num_passes}...")
+                print()
             
             for meas_idx in range(resolution):
                 measurement_start = time.time()
@@ -243,12 +250,17 @@ if __name__ == '__main__':
                         help='Output directory (default: data/directivity)')
     parser.add_argument('--doa-lock-angle', type=int, default=180,
                         help='Angle to lock the DOA at (default: 180°)')
+    parser.add_argument('--wait-between-passes', action='store_true',
+                        help='Wait for Enter key before starting each new pass (default: False)')
    
     args = parser.parse_args()
     
     # Recommended settings:
     # 3 passes with 50 points each:
     # sudo .venv/bin/python3 respeaker/test_directivity_multipass.py --passes 3 --resolution 50 --rotation-time 120 --duration 2 --doa-lock-angle 180
+    
+    # 1st test:
+    # sudo .venv/bin/python3 respeaker/test_directivity_multipass.py --passes 3 --resolution 40 --rotation-time 60 --duration 1 --doa-lock-angle 180 --wait-between-passes
     
     test_directivity_multipass(
         num_passes=args.passes,
@@ -257,5 +269,6 @@ if __name__ == '__main__':
         device_index=args.device,
         sample_duration=args.duration,
         output_dir=args.output,
-        doa_lock_angle=args.doa_lock_angle
+        doa_lock_angle=args.doa_lock_angle,
+        wait_between_passes=args.wait_between_passes
     )
