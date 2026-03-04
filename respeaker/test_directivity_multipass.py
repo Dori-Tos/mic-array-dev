@@ -153,7 +153,7 @@ def test_directivity_multipass(
                       f"Angle: {expected_angle:6.1f}° | "
                       f"Relative: {relative_angle:6.1f}° | "
                       f"DOA: {doa_angle:3d}° (locked) | "
-                      f"RMS: {rms_dbfs:6.1f} dBFS | "
+                      f"RMS: {rms_dbfs:6.1f} dBFS | ")
                 
                 # Wait for next measurement (accounting for processing time)
                 elapsed = time.time() - measurement_start
