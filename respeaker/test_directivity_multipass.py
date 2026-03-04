@@ -246,8 +246,8 @@ if __name__ == '__main__':
                         help='Audio device index (default: 1)')
     parser.add_argument('--duration', type=float, default=2.0,
                         help='Audio sample duration in seconds (default: 2.0)')
-    parser.add_argument('--output', type=str, default='data/directivity',
-                        help='Output directory (default: data/directivity)')
+    parser.add_argument('--output', type=str, default='data/directivity_multipass',
+                        help='Output directory (default: data/directivity_multipass)')
     parser.add_argument('--doa-lock-angle', type=int, default=180,
                         help='Angle to lock the DOA at (default: 180°)')
     parser.add_argument('--wait-between-passes', action='store_true',
