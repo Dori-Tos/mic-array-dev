@@ -64,6 +64,25 @@ def get_beamformer_status():
     
     return status
 
+def get_doa_angle():
+    """Get current DOA angle"""
+    mic_array = usb.core.find(idVendor=0x2886, idProduct=0x0018)
+    
+    if not mic_array:
+        print("ERROR: Respeaker 4 mic array not found")
+        return None
+    
+    tuning = Tuning(mic_array)
+    doa_angle = tuning.read('DOAANGLE')
+    tuning.close()
+    
+    if doa_angle is not None:
+        print(f"Current DOA Angle: {doa_angle}°")
+        return doa_angle
+    else:
+        print("ERROR: Failed to read DOA angle")
+        return None
+
 
 if __name__ == '__main__':
     if len(sys.argv) < 2:
@@ -81,7 +100,9 @@ if __name__ == '__main__':
         unlock_beamformer()
     elif command == 'status':
         get_beamformer_status()
+    elif command == 'get_doa':
+        get_doa_angle()
     else:
         print(f"Unknown command: {command}")
-        print("Use: lock, unlock, or status")
+        print("Use: lock, unlock, status, or get_doa")
         sys.exit(1)
