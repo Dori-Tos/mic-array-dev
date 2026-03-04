@@ -277,16 +277,17 @@ if __name__ == '__main__':
     # 1:
     #   - resolution: 36 (10° steps)
     #   - rotation_time: 90 seconds (1.5 minutes per rotation)
-    #   - sample_duration: 2 seconds (enough to capture burst and calculate RMS/Peak)
+    #   - sample_duration: 2 seconds
     #   => 2.5 seconds per measurement
     # = sudo .venv/bin/python3 respeaker/test_directivity.py --resolution 36 --rotation-time 90 --duration 2
     
     # 2:
-    #   - resolution: 72 (5° steps)
-    #   - rotation_time: 180 seconds (3 minutes per rotation)
+    #   - resolution: 50 (7.2° steps)
+    #   - rotation_time: 120 seconds (2 minutes per rotation)
     #   - sample_duration: 2 second 
     #   => 2.5 seconds per measurement
-    # = sudo .venv/bin/python3 respeaker/test_directivity.py --resolution 72 --rotation-time 180 --duration 2
+    #   + Set AGC gain to 26 for similar performances
+    # = sudo .venv/bin/python3 respeaker/test_directivity.py --resolution 50 --rotation-time 120 --duration 2 --signal-type continuous --doa-locked true --doa-lock-angle 180
     
     test_directivity(
         resolution=config['resolution'],

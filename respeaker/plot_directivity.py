@@ -32,8 +32,13 @@ def plot_directivity(csv_file, save_plot=True, save_location=None):
 
         # Main polar plot for RMS level
         ax1 = plt.subplot(221, projection='polar')
-        angles_rad = np.deg2rad(df[angle_column])
-        ax1.plot(angles_rad, df['rms_dbfs'], 'b-o', linewidth=2, markersize=4, label='RMS')
+        
+        # Close the loop by adding first point at the end
+        angles_closed = np.append(df[angle_column].values, df[angle_column].iloc[0])
+        rms_closed = np.append(df['rms_dbfs'].values, df['rms_dbfs'].iloc[0])
+        angles_rad = np.deg2rad(angles_closed)
+        
+        ax1.plot(angles_rad, rms_closed, 'b-o', linewidth=2, markersize=4, label='RMS')
         ax1.set_theta_zero_location('N')
         ax1.set_theta_direction(-1)
         ax1.set_title('RMS Level (dBFS)', pad=20, fontsize=12, fontweight='bold')
@@ -42,7 +47,11 @@ def plot_directivity(csv_file, save_plot=True, save_location=None):
 
         # Polar plot for Peak level
         ax2 = plt.subplot(222, projection='polar')
-        ax2.plot(angles_rad, df['peak_dbfs'], 'r-s', linewidth=2, markersize=4, label='Peak')
+        
+        # Close the loop by adding first point at the end
+        peak_closed = np.append(df['peak_dbfs'].values, df['peak_dbfs'].iloc[0])
+        
+        ax2.plot(angles_rad, peak_closed, 'r-s', linewidth=2, markersize=4, label='Peak')
         ax2.set_theta_zero_location('N')
         ax2.set_theta_direction(-1)
         ax2.set_title('Peak Level (dBFS)', pad=20, fontsize=12, fontweight='bold')
@@ -102,8 +111,13 @@ def plot_directivity(csv_file, save_plot=True, save_location=None):
         # Create figure with single polar plot for RMS level
         fig = plt.figure(figsize=(8, 6))
         ax1 = plt.subplot(111, projection='polar')
-        angles_rad = np.deg2rad(df[angle_column])
-        ax1.plot(angles_rad, df['rms_dbfs'], 'b-o', linewidth=2, markersize=4)
+        
+        # Close the loop by adding first point at the end
+        angles_closed = np.append(df[angle_column].values, df[angle_column].iloc[0])
+        rms_closed = np.append(df['rms_dbfs'].values, df['rms_dbfs'].iloc[0])
+        angles_rad = np.deg2rad(angles_closed)
+        
+        ax1.plot(angles_rad, rms_closed, 'b-o', linewidth=2, markersize=4)
         ax1.set_theta_zero_location('N')
         ax1.set_theta_direction(-1)
         title = 'RMS Level (dBFS)'
