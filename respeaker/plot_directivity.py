@@ -17,14 +17,29 @@ def plot_directivity(csv_file, save_plot=True, save_location=None):
     # Load data
     df = pd.read_csv(csv_file)
     
+    # Detect CSV structure
+    has_doa_angle = 'doa_angle' in df.columns
+    has_reference_rms = 'reference_rms_used' in df.columns
+    has_peak_dbfs = 'peak_dbfs' in df.columns
+    
     # Check if relative_angle is available (when beamformer is locked)
     use_relative_angle = 'relative_angle' in df.columns and df['relative_angle'].notna().any()
     angle_column = 'relative_angle' if use_relative_angle else 'expected_angle'
     angle_label = 'Relative Angle (from locked DOA)' if use_relative_angle else 'Angle'
     
+    # Check for peaks - ReSpeaker uses 'peaks' column
     peaks_available = 'peaks' in df.columns and df['peaks'].any()
     
-    if peaks_available:
+    # Get reference RMS info for title
+    reference_info = ""
+    if has_reference_rms:
+        ref_rms = df['reference_rms_used'].iloc[0]
+        # Convert to dBV (dB relative to 1V RMS)
+        ref_dbv = 20 * np.log10(ref_rms)
+        reference_info = f"\nReference: {ref_rms:.6f} V RMS ({ref_dbv:.1f} dBV)"
+    
+    # Use multi-plot layout only for ReSpeaker with peaks
+    if peaks_available and has_doa_angle:
         print("Peak measurements detected in data. Plotting both RMS and Peak levels.")
 
         # Create figure with polar plot
@@ -78,7 +93,7 @@ def plot_directivity(csv_file, save_plot=True, save_location=None):
             ax4.set_title('Directivity Pattern (Relative to Locked DOA)', fontsize=12, fontweight='bold')
             ax4.grid(True, alpha=0.3)
             ax4.set_xlim([0, 360])
-        else:
+        elif has_doa_angle:
             ax4.plot(df['expected_angle'], df['doa_angle'], 'g-^', linewidth=2, markersize=4)
             ax4.set_xlabel('Expected Angle (degrees)', fontsize=10)
             ax4.set_ylabel('Detected DOA Angle (degrees)', fontsize=10)
@@ -86,10 +101,19 @@ def plot_directivity(csv_file, save_plot=True, save_location=None):
             ax4.grid(True, alpha=0.3)
             ax4.set_xlim([0, 360])
             ax4.set_ylim([0, 360])
+        else:
+            # For standard mic, show cartesian plot instead
+            ax4.plot(df[angle_column], df['rms_dbfs'], 'b-o', linewidth=2, markersize=4)
+            ax4.set_xlabel(f'{angle_label} (degrees)', fontsize=10)
+            ax4.set_ylabel('RMS Level (dB)', fontsize=10)
+            ax4.set_title('Directivity Pattern', fontsize=12, fontweight='bold')
+            ax4.grid(True, alpha=0.3)
+            ax4.set_xlim([0, 360])
 
         # Add overall title with metadata
         test_name = Path(csv_file).stem
-        fig.suptitle(f'ReSpeaker Directivity Pattern - {test_name}', 
+        device_type = 'ReSpeaker' if has_doa_angle else 'Microphone'
+        fig.suptitle(f'{device_type} Directivity Pattern - {test_name}{reference_info}', 
                      fontsize=14, fontweight='bold', y=0.98)
 
         plt.tight_layout(rect=[0, 0, 1, 0.96])
@@ -128,7 +152,8 @@ def plot_directivity(csv_file, save_plot=True, save_location=None):
 
         # Add overall title with metadata
         test_name = Path(csv_file).stem
-        fig.suptitle(f'ReSpeaker Directivity Pattern - {test_name}', 
+        device_type = 'ReSpeaker' if has_doa_angle else 'Microphone'
+        fig.suptitle(f'{device_type} Directivity Pattern - {test_name}{reference_info}', 
                      fontsize=14, fontweight='bold', y=0.98)
 
         plt.tight_layout(rect=[0, 0, 1, 0.96])
@@ -148,18 +173,27 @@ def plot_directivity(csv_file, save_plot=True, save_location=None):
     print("\n" + "="*60)
     print("Directivity Statistics:")
     print("="*60)
+    
+    # Show reference info if available
+    if has_reference_rms:
+        ref_rms = df['reference_rms_used'].iloc[0]
+        ref_dbv = 20 * np.log10(ref_rms)
+        print(f"Reference RMS: {ref_rms:.6f} V ({ref_dbv:.1f} dBV)")
+        print()
+    
+    db_unit = "dBFS" if has_doa_angle else "dB"
     print(f"RMS Level:")
-    print(f"  Mean:   {df['rms_dbfs'].mean():.2f} dBFS")
-    print(f"  Min:    {df['rms_dbfs'].min():.2f} dBFS at {df.loc[df['rms_dbfs'].idxmin(), angle_column]:.1f}°")
-    print(f"  Max:    {df['rms_dbfs'].max():.2f} dBFS at {df.loc[df['rms_dbfs'].idxmax(), angle_column]:.1f}°")
+    print(f"  Mean:   {df['rms_dbfs'].mean():.2f} {db_unit}")
+    print(f"  Min:    {df['rms_dbfs'].min():.2f} {db_unit} at {df.loc[df['rms_dbfs'].idxmin(), angle_column]:.1f}°")
+    print(f"  Max:    {df['rms_dbfs'].max():.2f} {db_unit} at {df.loc[df['rms_dbfs'].idxmax(), angle_column]:.1f}°")
     print(f"  Range:  {df['rms_dbfs'].max() - df['rms_dbfs'].min():.2f} dB")
     if peaks_available:
         print(f"\nPeak Level:")
-        print(f"  Mean:   {df['peak_dbfs'].mean():.2f} dBFS")
-        print(f"  Min:    {df['peak_dbfs'].min():.2f} dBFS at {df.loc[df['peak_dbfs'].idxmin(), angle_column]:.1f}°")
-        print(f"  Max:    {df['peak_dbfs'].max():.2f} dBFS at {df.loc[df['peak_dbfs'].idxmax(), angle_column]:.1f}°")
+        print(f"  Mean:   {df['peak_dbfs'].mean():.2f} {db_unit}")
+        print(f"  Min:    {df['peak_dbfs'].min():.2f} {db_unit} at {df.loc[df['peak_dbfs'].idxmin(), angle_column]:.1f}°")
+        print(f"  Max:    {df['peak_dbfs'].max():.2f} {db_unit} at {df.loc[df['peak_dbfs'].idxmax(), angle_column]:.1f}°")
         print(f"  Range:  {df['peak_dbfs'].max() - df['peak_dbfs'].min():.2f} dB")
-    if use_relative_angle:
+    if use_relative_angle and 'locked_doa' in df.columns:
         print(f"\nBeamformer locked at: {df['locked_doa'].iloc[0]:.0f}°")
     print("="*60)
 
