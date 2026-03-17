@@ -1,18 +1,13 @@
 
 class Beamformer:
-    def __init__(self):
-        pass
+    def __init__(self, mic_channel_numbers: list[int]):
+        self.mic_channel_numbers = mic_channel_numbers
+        self.channel_count = len(mic_channel_numbers)
     
-    def set_microphones(self, mic_list):
-        self.mic_list = mic_list
-    
-
-
 class DASBeamformer(Beamformer):
-    def __init__(self):
-        super().__init__()
-        
-        
+    def __init__(self, mic_channel_numbers: list[int]):
+        super().__init__(mic_channel_numbers)
+
 class MVDRBeamformer(Beamformer):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, mic_channel_numbers: list[int]):
+        super().__init__(mic_channel_numbers)
