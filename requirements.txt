@@ -4,5 +4,4 @@ scipy
 pandas
 
 pyusb
-pyaudio
 sounddevice
