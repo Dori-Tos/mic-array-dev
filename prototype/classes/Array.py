@@ -9,16 +9,20 @@ from .Codec import Codec
 from typing import Sequence
 import numpy as np
 import threading
+import time
+import logging
 
 import sounddevice as sd
 
 
 class Array:
-    def __init__(self, id_vendor, id_product, mic_list: list[Microphone], sampling_rate: int,
+    def __init__(self, logger: logging.Logger,
+                 id_vendor, id_product, mic_list: list[Microphone], sampling_rate: int,
                  doa_estimator: DOAEstimator, beamformer: Beamformer, 
                  echo_canceller: EchoCanceller, filters: Sequence[Filter], agc: AGC, codec: Codec,
                  device_index: int | None = None):
         
+        self.logger: logging.Logger = logger
         self.id_vendor: int = id_vendor
         self.id_product: int = id_product
         self.mic_list: list[Microphone] = mic_list
@@ -38,80 +42,6 @@ class Array:
         self._latest_doa = None
         self._is_running = False
 
-    @property
-    def is_running(self) -> bool:
-        return self._is_running
-
-    def start_realtime(self, blocksize: int = 0):
-        """ 
-        Start real-time audio processing. This will open the audio stream and begin calling the callback function.
-        The callback will store the latest audio block, per-microphone samples, and DOA estimates for retrieval.
-        """
-        if self._is_running:
-            return
-        if not self.mic_list:
-            raise ValueError("Cannot start stream without microphones")
-
-        self._stream = sd.InputStream(
-            samplerate=self.sampling_rate,
-            channels=len(self.mic_list),
-            dtype='int16',
-            device=self.device_index,
-            callback=self._audio_callback,
-            latency='low',
-            blocksize=blocksize
-        )
-        self._stream.start()
-        self._is_running = True
-
-    def stop_realtime(self):
-        if not self._is_running:
-            return
-
-        if self._stream is not None:
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
-        self._is_running = False
-
-    def _audio_callback(self, indata, frames, time_info, status):
-        """
-        This callback is called by the audio stream for each block of audio data. It processes the incoming audio,
-        extracts per-microphone samples, estimates DOA, and stores the latest data for retrieval.
-        """
-        block = np.copy(indata)
-
-        if status:
-            print(f"[Array callback] {status}")
-
-        per_mic = {}
-        for idx, mic in enumerate(self.mic_list):
-            channel_index = mic.channel_number if mic.channel_number is not None else idx
-            if 0 <= channel_index < block.shape[1]:
-                per_mic[mic.channel_number] = block[:, channel_index].copy()
-
-        doa_value = None
-        if callable(self.doa_estimator.estimate_doa):
-            try:
-                doa_value = self.doa_estimator.estimate_doa(block)
-            except Exception:
-                doa_value = None
-
-        with self._lock:
-            self._latest_block = block
-            self._latest_per_mic = per_mic
-            self._latest_doa = doa_value
-
-    def get_latest_block(self) -> np.ndarray | None:
-        """
-        Get the latest audio block received from the stream. This will return a copy of the data to ensure thread safety.
-        """
-        
-        with self._lock:
-            if self._latest_block is None:
-                return None
-            return self._latest_block.copy()
-
     def get_latest_mic_samples(self, mic_channel_number: int) -> np.ndarray | None:
         """
         Get the latest audio samples for a specific microphone channel. This will return a copy of the data to ensure thread safety.
@@ -121,17 +51,231 @@ class Array:
             if data is None:
                 return None
             return data.copy()
+            
+    def test_all_microphones(self, duration_seconds: float = 2.0, poll_interval: float = 0.05):
+        """
+        Measure RMS for each microphone over a fixed time window.
 
-    def get_latest_doa(self):
+        Args:
+            duration_seconds: Measurement duration in seconds.
+            poll_interval: Time between polling the latest microphone buffers.
+
+        Returns:
+            Dictionary keyed by microphone channel with RMS summary.
         """
-        Get the latest DOA estimate. This will return a copy of the data to ensure thread safety.
+        if duration_seconds <= 0:
+            raise ValueError("duration_seconds must be > 0")
+        if poll_interval <= 0:
+            raise ValueError("poll_interval must be > 0")
+
+        mic_buffers: dict[int, list[np.ndarray]] = {
+            mic.channel_number: [] for mic in self.mic_list
+        }
+
+        start_time = time.time()
+        while (time.time() - start_time) < duration_seconds:
+            with self._lock:
+                snapshot = {
+                    mic.channel_number: self._latest_per_mic.get(mic.channel_number)
+                    for mic in self.mic_list
+                }
+
+            for channel_number, samples in snapshot.items():
+                if samples is not None and len(samples) > 0:
+                    mic_buffers[channel_number].append(samples.astype(np.float64, copy=False))
+
+            time.sleep(poll_interval)
+
+        full_scale = 32768.0
+        min_level = 1e-10
+        results = {}
+
+        for mic in self.mic_list:
+            channel_number = mic.channel_number
+            chunks = mic_buffers[channel_number]
+
+            if not chunks:
+                results[channel_number] = {
+                    'rms': None,
+                    'rms_dbfs': None,
+                    'num_samples': 0,
+                    'duration_seconds': duration_seconds
+                }
+                print(f"Mic {channel_number}: No data captured in {duration_seconds:.2f}s")
+                continue
+
+            all_samples = np.concatenate(chunks)
+            rms = float(np.sqrt(np.mean(all_samples ** 2)))
+            rms_dbfs = 20 * np.log10(max(rms, min_level) / full_scale)
+
+            results[channel_number] = {
+                'rms': rms,
+                'rms_dbfs': float(rms_dbfs),
+                'num_samples': int(all_samples.size),
+                'duration_seconds': duration_seconds
+            }
+
+            print(
+                f"Mic {channel_number}: RMS={rms:.2f} | "
+                f"RMS={rms_dbfs:.2f} dBFS | "
+                f"Samples={all_samples.size}"
+            )
+
+        return results
+    
+    def rec_audio_microphone(self, mic_channel_number: int, duration_seconds: float = 2.0) -> np.ndarray | None:
         """
-        with self._lock:
-            if self._latest_block is not None:
-                self._latest_doa = self.doa_estimator.estimate_doa(self._latest_block)
-                return self._latest_doa.copy() if self._latest_doa is not None else None
-            else:
-                return None
+        Capture raw audio samples from a specific microphone channel for a fixed duration.
+
+        Args:
+            mic_channel_number: The channel number of the microphone to capture from.
+            duration_seconds: Duration to capture audio in seconds.
+        
+        Returns:
+            A numpy array of captured audio samples, or None if no data was captured.
+        """
+        
+        if duration_seconds <= 0:
+            raise ValueError("duration_seconds must be > 0")
+
+        samples_list = []
+        start_time = time.time()
+        while (time.time() - start_time) < duration_seconds:
+            with self._lock:
+                samples = self._latest_per_mic.get(mic_channel_number)
+
+            if samples is not None and len(samples) > 0:
+                samples_list.append(samples.astype(np.float64, copy=False))
+
+            time.sleep(0.05)
+
+        if not samples_list:
+            print(f"Mic {mic_channel_number}: No data captured in {duration_seconds:.2f}s")
+            return None
+
+        all_samples = np.concatenate(samples_list)
+        print(f"Mic {mic_channel_number}: Captured {all_samples.size} samples in {duration_seconds:.2f}s")
+        return all_samples
+
+    def test_beamformer(
+        self,
+        duration_seconds: float = 2.0,
+        poll_interval: float = 0.05,
+        theta_deg: float | None = None,
+        reference_channel: int | None = None,
+    ):
+        """
+        Test beamformer output over a fixed time window.
+
+        Args:
+            duration_seconds: Measurement duration in seconds.
+            poll_interval: Time between polling the latest audio block.
+            theta_deg: Steering angle in degrees. If None, uses latest DOA when available,
+                otherwise uses the beamformer's current steering angle.
+            reference_channel: Channel number used as baseline for comparison.
+                If None, defaults to the first beamformer channel.
+
+        Returns:
+            Dictionary with RMS/dBFS for beamformed and reference signals.
+        """
+        if duration_seconds <= 0:
+            raise ValueError("duration_seconds must be > 0")
+        if poll_interval <= 0:
+            raise ValueError("poll_interval must be > 0")
+
+        if reference_channel is None:
+            reference_channel = int(self.beamformer.mic_channel_numbers[0])
+
+        beamformed_chunks: list[np.ndarray] = []
+        reference_chunks: list[np.ndarray] = []
+        angles_used: list[float] = []
+
+        start_time = time.time()
+        while (time.time() - start_time) < duration_seconds:
+            with self._lock:
+                block = None if self._latest_block is None else self._latest_block.copy()
+                doa_snapshot = self._latest_doa
+
+            if block is not None and block.ndim == 2 and block.shape[0] > 0:
+                if theta_deg is not None:
+                    angle = float(theta_deg)
+                elif isinstance(doa_snapshot, (int, float, np.integer, np.floating)):
+                    angle = float(doa_snapshot)
+                else:
+                    angle = float(self.beamformer.get_steering_angle())
+
+                try:
+                    beamformed = self.beamformer.apply(block, angle)
+                except Exception:
+                    beamformed = np.array([], dtype=np.float64)
+
+                if beamformed.size > 0:
+                    beamformed_chunks.append(beamformed.astype(np.float64, copy=False))
+                    angles_used.append(angle)
+
+                if block.shape[1] > reference_channel:
+                    reference = block[:, reference_channel]
+                    reference_chunks.append(reference.astype(np.float64, copy=False))
+
+            time.sleep(poll_interval)
+
+        if not beamformed_chunks or not reference_chunks:
+            print(f"Beamformer test: No data captured in {duration_seconds:.2f}s")
+            return {
+                "beamformed": {
+                    "rms": None,
+                    "rms_dbfs": None,
+                    "num_samples": 0,
+                },
+                "reference": {
+                    "channel": int(reference_channel),
+                    "rms": None,
+                    "rms_dbfs": None,
+                    "num_samples": 0,
+                },
+                "improvement_db": None,
+                "avg_angle_deg": None,
+                "duration_seconds": duration_seconds,
+            }
+
+        beamformed_all = np.concatenate(beamformed_chunks)
+        reference_all = np.concatenate(reference_chunks)
+
+        full_scale = 32768.0
+        min_level = 1e-10
+
+        beamformed_rms = float(np.sqrt(np.mean(beamformed_all ** 2)))
+        beamformed_dbfs = float(20 * np.log10(max(beamformed_rms, min_level) / full_scale))
+
+        reference_rms = float(np.sqrt(np.mean(reference_all ** 2)))
+        reference_dbfs = float(20 * np.log10(max(reference_rms, min_level) / full_scale))
+
+        improvement_db = float(beamformed_dbfs - reference_dbfs)
+        avg_angle_deg = float(np.mean(angles_used)) if angles_used else None
+
+        print(
+            f"Beamformer: RMS={beamformed_rms:.2f} | RMS={beamformed_dbfs:.2f} dBFS | "
+            f"Ref ch {reference_channel}: RMS={reference_rms:.2f} | RMS={reference_dbfs:.2f} dBFS | "
+            f"Delta={improvement_db:.2f} dB"
+        )
+
+        return {
+            "beamformed": {
+                "rms": beamformed_rms,
+                "rms_dbfs": beamformed_dbfs,
+                "num_samples": int(beamformed_all.size),
+            },
+            "reference": {
+                "channel": int(reference_channel),
+                "rms": reference_rms,
+                "rms_dbfs": reference_dbfs,
+                "num_samples": int(reference_all.size),
+            },
+            "improvement_db": improvement_db,
+            "avg_angle_deg": avg_angle_deg,
+            "duration_seconds": duration_seconds,
+        }
+        
 
         
     

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?><MicArray name="1_square">
+   <!-- First Version of prototype, 4 microphones in a square pattern. -->
+  <pos Name="Point 1" x="0.055" y="0" z="0"/>
+  <pos Name="Point 2" x="0.00" y="0" z="0.055"/>
+  <pos Name="Point 3" x="0.055" y="0" z="0.055"/>
+  <pos Name="Point 4" x="0.11" y="0" z="0.055"/>
+</MicArray>

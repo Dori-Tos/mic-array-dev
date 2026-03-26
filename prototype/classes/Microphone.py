@@ -1,5 +1,8 @@
+import logging
+
 class Microphone:
-    def __init__(self, channel_number: int, sampling_rate: int):
+    def __init__(self, logger: logging.Logger, channel_number: int, sampling_rate: int):
+        self.logger = logger
         # Channel index in the multichannel USB stream (0-based)
         self.channel_number = channel_number
         self.sampling_rate = sampling_rate

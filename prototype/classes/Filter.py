@@ -1,9 +1,10 @@
 import scipy.signal as signal
 import numpy as np
-
+import logging
 
 class Filter:
-    def __init__(self, sample_rate: int, order: int = 4):
+    def __init__(self, logger: logging.Logger, sample_rate: int, order: int = 4):
+        self.logger = logger
         self.sample_rate = sample_rate
         self.order = order
         self.sos = None
@@ -52,8 +53,8 @@ class HighPassFilter(Filter):
     A high-pass filter that allows frequencies above the cutoff frequency to pass through.
     """
     
-    def __init__(self, sample_rate: int, cutoff_freq: float, order: int = 4):
-        super().__init__(sample_rate, order=order)
+    def __init__(self, logger: logging.Logger, sample_rate: int, cutoff_freq: float, order: int = 4):
+        super().__init__(logger, sample_rate, order=order)
         self.cutoff_freq = cutoff_freq
         self._validate_cutoff(cutoff_freq)
         self.sos = signal.butter(
@@ -69,8 +70,8 @@ class LowPassFilter(Filter):
     A low-pass filter that allows frequencies below the cutoff frequency to pass through.
     """
     
-    def __init__(self, sample_rate: int, cutoff_freq: float, order: int = 4):
-        super().__init__(sample_rate, order=order)
+    def __init__(self, logger: logging.Logger, sample_rate: int, cutoff_freq: float, order: int = 4):
+        super().__init__(logger, sample_rate, order=order)
         self.cutoff_freq = cutoff_freq
         self._validate_cutoff(cutoff_freq)
         self.sos = signal.butter(
@@ -86,8 +87,8 @@ class BandPassFilter(Filter):
     A band-pass filter that allows frequencies between low_cutoff and high_cutoff to pass through.
     """
     
-    def __init__(self, sample_rate: int, low_cutoff: float, high_cutoff: float, order: int = 4):
-        super().__init__(sample_rate, order=order)
+    def __init__(self, logger: logging.Logger, sample_rate: int, low_cutoff: float, high_cutoff: float, order: int = 4):
+        super().__init__(logger, sample_rate, order=order)
         self._validate_cutoff(low_cutoff)
         self._validate_cutoff(high_cutoff)
         if low_cutoff >= high_cutoff:
@@ -105,8 +106,8 @@ class BandStopFilter(Filter):
     A band-stop (notch) filter that attenuates frequencies between low_cutoff and high_cutoff.
     """
     
-    def __init__(self, sample_rate: int, low_cutoff: float, high_cutoff: float, order: int = 4):
-        super().__init__(sample_rate, order=order)
+    def __init__(self, logger: logging.Logger, sample_rate: int, low_cutoff: float, high_cutoff: float, order: int = 4):
+        super().__init__(logger, sample_rate, order=order)
         self._validate_cutoff(low_cutoff)
         self._validate_cutoff(high_cutoff)
         if low_cutoff >= high_cutoff:
