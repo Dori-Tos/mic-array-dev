@@ -118,3 +118,124 @@ class BandStopFilter(Filter):
             btype='bandstop',
             output='sos'
         )
+        
+        
+class KalmanFilter(Filter):
+    """
+    
+    """
+    
+    def __init__(self, logger: logging.Logger, sample_rate: int, order: int = 4):
+        super().__init__(logger, sample_rate, order=order)
+
+    def apply(self, data: np.ndarray) -> np.ndarray:
+        raise NotImplementedError("KalmanFilter is not implemented yet. Use WienerFilter for denoising.")
+
+
+class WienerFilter(Filter):
+    """
+    Adaptive spectral Wiener denoiser for streaming 1D/2D audio blocks.
+
+    Parameters:
+    - noise_alpha: EMA factor for noise PSD tracking (higher = slower updates).
+    - gain_floor: Minimum spectral gain to avoid musical artifacts.
+    - gain_smooth_alpha: Temporal smoothing factor for per-bin gain.
+    - noise_update_snr_db: Update noise model when frame SNR is below this threshold.
+    - noise_update_rms: Force noise update for very quiet frames.
+    """
+
+    def __init__(
+        self,
+        logger: logging.Logger,
+        sample_rate: int,
+        noise_alpha: float = 0.98,
+        gain_floor: float = 0.08,
+        gain_smooth_alpha: float = 0.75,
+        noise_update_snr_db: float = 3.0,
+        noise_update_rms: float = 4e-4,
+    ):
+        super().__init__(logger, sample_rate, order=1)
+        if not 0.0 < noise_alpha < 1.0:
+            raise ValueError("noise_alpha must be in (0, 1)")
+        if not 0.0 <= gain_floor <= 1.0:
+            raise ValueError("gain_floor must be in [0, 1]")
+        if not 0.0 <= gain_smooth_alpha < 1.0:
+            raise ValueError("gain_smooth_alpha must be in [0, 1)")
+        if noise_update_rms < 0.0:
+            raise ValueError("noise_update_rms must be >= 0")
+
+        self.noise_alpha = float(noise_alpha)
+        self.gain_floor = float(gain_floor)
+        self.gain_smooth_alpha = float(gain_smooth_alpha)
+        self.noise_update_snr_db = float(noise_update_snr_db)
+        self.noise_update_rms = float(noise_update_rms)
+        self._eps = 1e-12
+
+        self._noise_psd_1d: np.ndarray | None = None
+        self._prev_gain_1d: np.ndarray | None = None
+        self._noise_psd_2d: list[np.ndarray] | None = None
+        self._prev_gain_2d: list[np.ndarray] | None = None
+
+    def reset(self):
+        self._noise_psd_1d = None
+        self._prev_gain_1d = None
+        self._noise_psd_2d = None
+        self._prev_gain_2d = None
+
+    def _denoise_channel(
+        self,
+        x: np.ndarray,
+        noise_psd: np.ndarray | None,
+        prev_gain: np.ndarray | None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        x = np.asarray(x, dtype=np.float64).reshape(-1)
+        if x.size == 0:
+            empty = np.array([], dtype=np.float64)
+            return empty, np.array([], dtype=np.float64), np.array([], dtype=np.float64)
+
+        x_fft = np.fft.rfft(x)
+        power = (np.abs(x_fft) ** 2).astype(np.float64, copy=False)
+
+        if noise_psd is None or noise_psd.shape != power.shape:
+            noise_psd = power.copy()
+        else:
+            frame_rms = float(np.sqrt(np.mean(x * x) + self._eps))
+            frame_snr_db = 10.0 * np.log10((float(np.mean(power)) + self._eps) / (float(np.mean(noise_psd)) + self._eps))
+            if frame_rms <= self.noise_update_rms or frame_snr_db <= self.noise_update_snr_db:
+                noise_psd = self.noise_alpha * noise_psd + (1.0 - self.noise_alpha) * power
+
+        post_snr = power / (noise_psd + self._eps)
+        gain = np.maximum(self.gain_floor, (post_snr - 1.0) / np.maximum(post_snr, self._eps))
+
+        if prev_gain is None or prev_gain.shape != gain.shape:
+            smoothed_gain = gain
+        else:
+            smoothed_gain = self.gain_smooth_alpha * prev_gain + (1.0 - self.gain_smooth_alpha) * gain
+
+        y_fft = x_fft * smoothed_gain
+        y = np.fft.irfft(y_fft, n=x.size)
+        return y.astype(np.float64, copy=False), noise_psd, smoothed_gain
+
+    def apply(self, data: np.ndarray) -> np.ndarray:
+        arr = np.asarray(data, dtype=np.float64)
+        if arr.ndim == 1:
+            y, self._noise_psd_1d, self._prev_gain_1d = self._denoise_channel(
+                arr, self._noise_psd_1d, self._prev_gain_1d
+            )
+            return y
+
+        if arr.ndim == 2:
+            n_ch = arr.shape[1]
+            if self._noise_psd_2d is None or len(self._noise_psd_2d) != n_ch:
+                self._noise_psd_2d = [None] * n_ch
+                self._prev_gain_2d = [None] * n_ch
+
+            out = np.empty_like(arr, dtype=np.float64)
+            for ch in range(n_ch):
+                y, self._noise_psd_2d[ch], self._prev_gain_2d[ch] = self._denoise_channel(
+                    arr[:, ch], self._noise_psd_2d[ch], self._prev_gain_2d[ch]
+                )
+                out[:, ch] = y
+            return out
+
+        raise ValueError("WienerFilter input must be 1D or 2D with shape (samples, channels)")

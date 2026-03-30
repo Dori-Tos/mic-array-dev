@@ -3,8 +3,8 @@ from classes.Microphone import Microphone
 from classes.DOAEstimator import  IterativeDOAEstimator
 from classes.Beamformer import DASBeamformer, MVDRBeamformer
 from classes.EchoCanceller import EchoCanceller
-from classes.Filter import HighPassFilter, LowPassFilter, BandPassFilter, BandStopFilter
-from classes.AGC import AGC
+from classes.Filter import HighPassFilter, LowPassFilter, BandPassFilter, BandStopFilter, WienerFilter
+from classes.AGC import AGC, TwoStageAGC
 from classes.Codec import G711Codec, OpusCodec
 
 import time
@@ -19,9 +19,8 @@ if __name__ == "__main__":
     script_dir = Path(__file__).resolve().parent
     sample_rate = 48000
     downsample_rate = 16000  # Downsample from 48 kHz to 16 kHz for faster processing
-    cutoff_freq = 6000.0
     order = 4
-    monitor_gain = 0.2
+    monitor_gain = 0.22
     
     mic_channel_numbers = [0, 1, 2, 3]
     
@@ -40,8 +39,7 @@ if __name__ == "__main__":
     geometry_path = script_dir / "array_geometries" / "1_square.xml"
     mic_positions = MVDRBeamformer.load_positions_from_xml(str(geometry_path))
     
-    # Use fast DAS beamformer for DOA estimation (much faster than MVDR)
-    # MVDR is too slow for real-time DOA scanning at 850ms per scan
+    # DAS for DOA estimation (faster than MVDR)
     das_beamformer = DASBeamformer(
         logger=logger,
         mic_channel_numbers=mic_channel_numbers,
@@ -49,15 +47,16 @@ if __name__ == "__main__":
         mic_positions_m=mic_positions,
     )
     
-    # MVDR beamformer for final beamforming (best quality)
+    # MVDR for main beamforming (higher quality than DAS)
     mvdr_beamformer = MVDRBeamformer(
         logger=logger,
         mic_channel_numbers=mic_channel_numbers,
         sample_rate=sample_rate,
         mic_positions_m=mic_positions,
+        covariance_alpha=0.97,
+        diagonal_loading=5e-2,
     )
     
-    # DOA estimator uses fast DAS for scanning
     doa_estimator = IterativeDOAEstimator(
         logger=logger,
         update_rate=3.0,
@@ -66,8 +65,50 @@ if __name__ == "__main__":
         scan_step_deg=5.0,
     )
     echo_canceller = EchoCanceller(logger=logger, sample_rate=sample_rate, channels=4)
-    filters = [LowPassFilter(logger=logger, sample_rate=sample_rate, cutoff_freq=cutoff_freq, order=order)]
-    agc = AGC()
+    
+    # Passband to eliminate low-frequency rumble and high-frequency hiss
+    # Wiener filter for continuous noise reduction
+    filter_rate = downsample_rate if downsample_rate is not None else sample_rate
+    filters = [
+        BandPassFilter(
+            logger=logger, 
+            sample_rate=filter_rate, 
+            low_cutoff=300.0, 
+            high_cutoff=3200.0, 
+            order=order),
+        
+        WienerFilter(
+            logger=logger,
+            sample_rate=filter_rate,
+            noise_alpha=0.985,
+            gain_floor=0.05,
+            gain_smooth_alpha=0.86,
+            noise_update_snr_db=6.0,
+            noise_update_rms=8e-4,
+        ),
+    ]
+    
+    agc_fast = AGC(
+        logger=logger,
+        target_rms=0.0025,
+        min_gain=0.7,
+        max_gain=12.0,
+        attack_ms=8.0,
+        release_ms=200.0,
+        noise_floor_rms=0.0,
+        gate_gain=1.0,
+    )
+    agc_slow = AGC(
+        logger=logger,
+        target_rms=0.009,
+        min_gain=0.9,
+        max_gain=10.0,
+        attack_ms=40.0,
+        release_ms=2200.0,
+        noise_floor_rms=0.00012,
+        gate_gain=0.35,
+    )
+    agc = TwoStageAGC(logger=logger, stage1=agc_fast, stage2=agc_slow)
     codec = G711Codec(logger=logger)
 
     array = Array_RealTime(
@@ -77,7 +118,7 @@ if __name__ == "__main__":
         mic_list=mic_list,
         sampling_rate=sample_rate,
         doa_estimator=doa_estimator,
-        beamformer=mvdr_beamformer,  # Use MVDR for high-quality output beamforming
+        beamformer=mvdr_beamformer, 
         echo_canceller=echo_canceller,
         filters=filters,
         agc=agc,
@@ -90,16 +131,13 @@ if __name__ == "__main__":
     array.start_output_monitoring()
 
     try:
-        time.sleep(1)
         print("Realtime beamformed monitoring started. Press Ctrl+C to stop.")
         while True:
-            doa = array.get_latest_doa()
-            if doa is not None:
-                print(f"DOA: {doa:.1f}°")
-            time.sleep(1.0)
+            time.sleep(0.1)
 
     except KeyboardInterrupt:
-        print("Stopping...")
+        print("\nStopping...")
         
     finally:
         array.stop_realtime()
+        array.stop_output_monitoring()

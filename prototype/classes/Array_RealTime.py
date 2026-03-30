@@ -8,8 +8,20 @@ import threading
 import queue
 import logging
 
+from scipy import signal
+from collections import deque
+from math import gcd
+
 class Array_RealTime(Array):
-    def __init__(self, *args, logger: logging.Logger, monitor_gain: float = 0.2, downsample_rate: int | None = None, **kwargs):
+    """
+    Parameters:
+    - logger: logging.Logger instance for logging messages.
+    - monitor_gain: Gain factor applied to the beamformed output for monitoring through speakers (default: 0.35).
+    - downsample_rate: If set, downsample the input audio to this rate for processing
+        (e.g., 16000 Hz) to reduce computational load. The original sample rate is restored after processing. 
+    """ 
+    
+    def __init__(self, *args, logger: logging.Logger, monitor_gain: float = 0.35, downsample_rate: int | None = None, **kwargs):
         super().__init__(*args, logger=logger, **kwargs)
         self._latest_block = None
         self._latest_per_mic = {}
@@ -18,8 +30,21 @@ class Array_RealTime(Array):
         
         self.monitor_gain = monitor_gain
         self.downsample_rate = downsample_rate  # Downsample to this rate (e.g., 16000 Hz)
+        self._output_playback_rate = self.sampling_rate
         self._output_stream = None
         self._output_status_state = {"last_print": 0.0}
+        self._output_fifo = deque()
+        self._output_fifo_lock = threading.Lock()
+        self._output_current_chunk = np.zeros(0, dtype=np.float32)
+        self._output_buffered_samples = 0
+        self._output_max_buffer_samples = int(self._output_playback_rate * 1.0)
+
+        # Cache for downsampling internals so output-size probing is not repeated every block.
+        self._downsample_cache_rate = None
+        self._downsample_cache_factor = None
+        self._downsample_cache_in_len = None
+        self._downsample_cache_channels = None
+        self._downsample_scratch = None
         
         # Audio processing queue and thread
         # Larger queue to handle slow processing without dropping blocks
@@ -30,10 +55,6 @@ class Array_RealTime(Array):
         self._last_catchup_log = 0.0
         self._processing_thread = None
         self._processing_stop_event = threading.Event()
-
-        estimator_beamformer = getattr(self.doa_estimator, "beamformer", None)
-        if estimator_beamformer is not None and estimator_beamformer is not self.beamformer:
-            setattr(self.doa_estimator, "beamformer", self.beamformer)
 
     @property
     def is_running(self) -> bool:
@@ -105,7 +126,6 @@ class Array_RealTime(Array):
         try:
             self._audio_queue.put_nowait(block)
         except queue.Full:
-            # Queue is full, drop oldest block
             self.logger.debug("Queue full, dropping oldest block")
             try:
                 self._audio_queue.get_nowait()
@@ -116,8 +136,12 @@ class Array_RealTime(Array):
     def _downsample_block(self, block: np.ndarray) -> np.ndarray:
         """
         Downsample audio block using scipy.signal.decimate.
-        Input: (n_samples, n_channels), Output: downsampled (n_samples//decimation, n_channels)
-        Reduces computation significantly when working with high sample rates.
+        
+        Parameters:
+        - block: Input audio block with shape (n_samples, n_channels)
+        
+        Output:
+        - downsampled block with shape (n_samples//decimation_factor, n_channels)
         """
         if self.downsample_rate is None or self.downsample_rate >= self.sampling_rate:
             return block
@@ -125,21 +149,52 @@ class Array_RealTime(Array):
         decimation_factor = self.sampling_rate // self.downsample_rate
         if decimation_factor <= 1:
             return block
-        
+
+        in_len, n_channels = block.shape
+        cache_valid = (
+            self._downsample_cache_rate == self.sampling_rate
+            and self._downsample_cache_factor == decimation_factor
+            and self._downsample_cache_in_len == in_len
+            and self._downsample_cache_channels == n_channels
+            and self._downsample_scratch is not None
+        )
+
+        if not cache_valid:
+            # Probe once to capture exact output length for this config.
+            ch0_decimated = signal.decimate(block[:, 0].astype(np.float32), decimation_factor, zero_phase=True)
+            out_len = int(ch0_decimated.size)
+            self._downsample_scratch = np.empty((out_len, n_channels), dtype=np.float32)
+            self._downsample_scratch[:, 0] = ch0_decimated
+
+            self._downsample_cache_rate = self.sampling_rate
+            self._downsample_cache_factor = decimation_factor
+            self._downsample_cache_in_len = in_len
+            self._downsample_cache_channels = n_channels
+        else:
+            self._downsample_scratch[:, 0] = signal.decimate(
+                block[:, 0].astype(np.float32), decimation_factor, zero_phase=True
+            )
+
+        # Decimate remaining channels into cached scratch buffer.
+        for ch in range(1, n_channels):
+            self._downsample_scratch[:, ch] = signal.decimate(
+                block[:, ch].astype(np.float32), decimation_factor, zero_phase=True
+            )
+
+        # Return a copy because the scratch buffer is reused on the next block.
+        return self._downsample_scratch.copy()
+
+    def _resample_to_playback_rate(self, mono: np.ndarray, in_rate: int) -> np.ndarray:
+        """Resample mono chunk to output playback rate when processing is downsampled."""
+        if in_rate <= 0 or in_rate == self._output_playback_rate:
+            return mono
+
         from scipy import signal
-        # Decimate first channel to determine actual output size
-        # (scipy.signal.decimate may produce slightly different size than input // factor)
-        ch0_decimated = signal.decimate(block[:, 0].astype(np.float32), decimation_factor, zero_phase=True)
-        
-        # Preallocate with correct output size
-        downsampled = np.zeros((len(ch0_decimated), block.shape[1]), dtype=np.float32)
-        downsampled[:, 0] = ch0_decimated
-        
-        # Decimate remaining channels
-        for ch in range(1, block.shape[1]):
-            downsampled[:, ch] = signal.decimate(block[:, ch].astype(np.float32), decimation_factor, zero_phase=True)
-        
-        return downsampled
+
+        g = gcd(int(self._output_playback_rate), int(in_rate))
+        up = int(self._output_playback_rate // g)
+        down = int(in_rate // g)
+        return signal.resample_poly(mono, up, down).astype(np.float32, copy=False)
 
     def _process_audio_thread(self):
         """
@@ -152,6 +207,9 @@ class Array_RealTime(Array):
         
         # Store original sample rate for restoration
         self._original_sampling_rate = self.sampling_rate
+        original_bf_rate = getattr(self.beamformer, "sample_rate", None)
+        doa_beamformer = getattr(self.doa_estimator, "beamformer", None)
+        original_doa_bf_rate = getattr(doa_beamformer, "sample_rate", None)
         
         while not self._processing_stop_event.is_set():
             try:
@@ -183,6 +241,10 @@ class Array_RealTime(Array):
             if self.downsample_rate is not None and self.downsample_rate < self.sampling_rate:
                 block = self._downsample_block(block)
                 self.sampling_rate = self.downsample_rate  # Temporarily change sample rate
+                if hasattr(self.beamformer, "sample_rate"):
+                    self.beamformer.sample_rate = int(self.downsample_rate)
+                if doa_beamformer is not None and hasattr(doa_beamformer, "sample_rate"):
+                    doa_beamformer.sample_rate = int(self.downsample_rate)
                 self.logger.debug(f"[Processing] Downsampled to {self.downsample_rate} Hz, new block shape: {block.shape}")
 
             # Extract per-microphone samples
@@ -225,6 +287,29 @@ class Array_RealTime(Array):
                         beamformed_arr = np.asarray(beamformed)
                         if beamformed_arr.size > 0:
                             beamformed_value = beamformed_arr.copy()
+                            # Queue audio chunk for real-time output playback
+                            mono_raw = np.asarray(beamformed_arr, dtype=np.float32).reshape(-1)
+                            peak = float(np.max(np.abs(mono_raw))) if mono_raw.size > 0 else 0.0
+                            # If values look int16-like, scale; otherwise keep as normalized float.
+                            mono_out = mono_raw / 32768.0 if peak > 4.0 else mono_raw
+                            # Apply optional post-beamforming filters before AGC.
+                            for filt in self.filters:
+                                if callable(getattr(filt, "apply", None)):
+                                    try:
+                                        mono_out = np.asarray(filt.apply(mono_out), dtype=np.float32).reshape(-1)
+                                    except Exception as filter_err:
+                                        self.logger.warning(f"[Filter] {type(filter_err).__name__}: {filter_err}")
+                            output_sample_rate = self.downsample_rate if self.downsample_rate is not None else self.sampling_rate
+                            mono_out = self.agc.process(mono_out, sample_rate=output_sample_rate)
+                            mono_out = np.tanh(mono_out * self.monitor_gain)
+                            processing_rate = self.downsample_rate if self.downsample_rate is not None else self.sampling_rate
+                            mono_out = self._resample_to_playback_rate(mono_out, int(processing_rate))
+                            with self._output_fifo_lock:
+                                self._output_fifo.append(mono_out)
+                                self._output_buffered_samples += mono_out.size
+                                while self._output_buffered_samples > self._output_max_buffer_samples and len(self._output_fifo) > 0:
+                                    old = self._output_fifo.popleft()
+                                    self._output_buffered_samples -= old.size
                             elapsed_bf = time.monotonic() - start_bf
                             self.logger.debug(f"[Beamforming] Output shape: {beamformed_arr.shape} (took {elapsed_bf*1000:.2f}ms)")
                     else:
@@ -237,6 +322,10 @@ class Array_RealTime(Array):
             # Restore original sample rate if downsampled
             if self.sampling_rate != original_rate:
                 self.sampling_rate = original_rate
+                if hasattr(self.beamformer, "sample_rate") and original_bf_rate is not None:
+                    self.beamformer.sample_rate = int(original_bf_rate)
+                if doa_beamformer is not None and hasattr(doa_beamformer, "sample_rate") and original_doa_bf_rate is not None:
+                    doa_beamformer.sample_rate = int(original_doa_bf_rate)
 
             # Store results
             total_time = time.monotonic() - start_doa
@@ -296,12 +385,18 @@ class Array_RealTime(Array):
         """
         if self._output_stream is not None:
             return
+
+        output_sample_rate = self._output_playback_rate
+        with self._output_fifo_lock:
+            self._output_fifo.clear()
+            self._output_current_chunk = np.zeros(0, dtype=np.float32)
+            self._output_buffered_samples = 0
         
         self._output_stream = sd.OutputStream(
-            samplerate=self.sampling_rate,
+            samplerate=output_sample_rate,
             channels=1,
             dtype='float32',
-            latency='high',
+            latency='low',
             blocksize=blocksize,
             callback=self._output_callback,
         )
@@ -317,6 +412,10 @@ class Array_RealTime(Array):
         self._output_stream.stop()
         self._output_stream.close()
         self._output_stream = None
+        with self._output_fifo_lock:
+            self._output_fifo.clear()
+            self._output_current_chunk = np.zeros(0, dtype=np.float32)
+            self._output_buffered_samples = 0
 
     def _output_callback(self, outdata, frames, time_info, status):
         """
@@ -329,17 +428,23 @@ class Array_RealTime(Array):
                 self.logger.warning(f"[Output callback] {status}")
                 self._output_status_state["last_print"] = now
 
-        beamformed = self.get_latest_beamformed()
-        if beamformed is None or beamformed.size == 0:
-            chunk = np.zeros(frames, dtype=np.float32)
-        else:
-            mono = np.asarray(beamformed, dtype=np.float32)
-            mono = np.clip((mono / 32768.0) * self.monitor_gain, -1.0, 1.0)
+        chunk = np.zeros(frames, dtype=np.float32)
+        write_idx = 0
 
-            if mono.size >= frames:
-                chunk = mono[:frames]
-            else:
-                chunk = np.zeros(frames, dtype=np.float32)
-                chunk[:mono.size] = mono
+        while write_idx < frames:
+            if self._output_current_chunk.size == 0:
+                with self._output_fifo_lock:
+                    if len(self._output_fifo) > 0:
+                        self._output_current_chunk = self._output_fifo.popleft()
+                        self._output_buffered_samples -= self._output_current_chunk.size
+                    else:
+                        break
 
-        outdata[:, 0] = chunk
+            remaining = frames - write_idx
+            take = min(remaining, self._output_current_chunk.size)
+            if take > 0:
+                chunk[write_idx:write_idx + take] = self._output_current_chunk[:take]
+                self._output_current_chunk = self._output_current_chunk[take:]
+                write_idx += take
+
+        outdata[:, 0] = np.clip(chunk, -1.0, 1.0)
