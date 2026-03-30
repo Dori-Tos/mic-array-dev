@@ -103,19 +103,25 @@ class Beamformer:
     def _steering_matrix(self, theta_rad: float, n_fft: int) -> np.ndarray:
         """
         Returns a steering matrix of shape (freq_bins, num_mics).
+
+        Azimuth convention used here:
+        - 0° points to +y (forward)
+        - +90° points to +x (right)
+        - -90° points to -x (left)
+        - z is treated as height and ignored for azimuth steering
         """
         freq_bins = np.fft.rfftfreq(n_fft, d=1.0 / self.sample_rate)
 
         direction = np.array(
             [
                 np.sin(theta_rad),
-                0.0,
                 np.cos(theta_rad),
+                0.0,
             ],
             dtype=np.float64,
         )
 
-        relative_positions = self.mic_positions_m - self.mic_positions_m[0]
+        relative_positions = self.mic_positions_m - np.mean(self.mic_positions_m, axis=0)
         delays = (relative_positions @ direction) / self.sound_speed_m_s
         return np.exp(-1j * 2.0 * np.pi * freq_bins[:, None] * delays[None, :])
 
@@ -191,14 +197,14 @@ class MVDRBeamformer(Beamformer):
         self.covariance_alpha = float(covariance_alpha)
         self.diagonal_loading = float(diagonal_loading)
         self._covariance: np.ndarray | None = None
+        self._identity = np.eye(self.channel_count, dtype=np.complex128)
 
     def reset(self):
         self._covariance = None
 
     def _ensure_covariance(self, freq_bins: int):
         if self._covariance is None or self._covariance.shape[0] != freq_bins:
-            identity = np.eye(self.channel_count, dtype=np.complex128)
-            self._covariance = np.repeat(identity[None, :, :], freq_bins, axis=0)
+            self._covariance = np.repeat(self._identity[None, :, :], freq_bins, axis=0)
 
     def process(self, block: np.ndarray, theta_deg: float) -> np.ndarray:
         selected = self._select_channels(np.asarray(block, dtype=np.float64))
@@ -216,11 +222,10 @@ class MVDRBeamformer(Beamformer):
         assert self._covariance is not None
 
         output_spectrum = np.zeros(freq_bins, dtype=np.complex128)
-        identity = np.eye(self.channel_count, dtype=np.complex128)
 
         for i in range(freq_bins):
-            x = spectrum[i, :].reshape(-1, 1)
-            r_inst = x @ x.conj().T
+            x = spectrum[i, :]
+            r_inst = np.outer(x, np.conj(x))
             self._covariance[i] = (
                 self.covariance_alpha * self._covariance[i]
                 + (1.0 - self.covariance_alpha) * r_inst
@@ -228,17 +233,21 @@ class MVDRBeamformer(Beamformer):
 
             trace_r = np.trace(self._covariance[i]).real
             loading = self.diagonal_loading * (trace_r / self.channel_count + 1e-12)
-            r_loaded = self._covariance[i] + loading * identity
+            r_loaded = self._covariance[i] + loading * self._identity
 
-            a = steering[i, :].reshape(-1, 1)
-            r_inv_a = np.linalg.pinv(r_loaded) @ a
-            denom = (a.conj().T @ r_inv_a).item()
+            a = steering[i, :]
+            try:
+                r_inv_a = np.linalg.solve(r_loaded, a)
+            except np.linalg.LinAlgError:
+                r_inv_a = np.linalg.pinv(r_loaded) @ a
+
+            denom = np.vdot(a, r_inv_a)
             if np.abs(denom) < 1e-12:
-                w = np.ones((self.channel_count, 1), dtype=np.complex128) / self.channel_count
+                w = np.ones(self.channel_count, dtype=np.complex128) / self.channel_count
             else:
                 w = r_inv_a / denom
 
-            output_spectrum[i] = (w.conj().T @ x).item()
+            output_spectrum[i] = np.vdot(w, x)
 
         return np.fft.irfft(output_spectrum, n=n_samples).astype(np.float64, copy=False)
 

@@ -1,7 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?><MicArray name="1_square">
-   <!-- First Version of prototype, 4 microphones in a square pattern. -->
-  <pos Name="Point 1" x="0.055" y="0" z="0"/>
-  <pos Name="Point 2" x="0.00" y="0" z="0.055"/>
-  <pos Name="Point 3" x="0.055" y="0" z="0.055"/>
-  <pos Name="Point 4" x="0.11" y="0" z="0.055"/>
+  <!--
+    Square-on-corner (diamond) layout in x-z plane.
+    Convention:
+    - +x is right, -x is left
+    - +y is front
+    - 0° points to +y (front center)
+    - +angle points to the right side (+x)
+
+    Channel mapping requested:
+    - Pair 1-2: ch1 right, ch2 left (upper left side)
+    - Pair 3-4: ch3 right, ch4 left (lower right side)
+  -->
+  <pos Name="Point 1" x="0" y="0" z="0.055"/>
+  <pos Name="Point 2" x="-0.055" y="0" z="0"/>
+  <pos Name="Point 3" x="0.055" y="0" z="0"/>
+  <pos Name="Point 4" x="0" y="0" z="-0.055"/>
 </MicArray>

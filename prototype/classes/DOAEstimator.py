@@ -51,6 +51,8 @@ class IterativeDOAEstimator(DOAEstimator):
         angle_range: tuple = (-25, 25),
         beamformer: Beamformer | None = None,
         scan_step_deg: float = 1.0,
+        normalize_channels: bool = True,
+        bootstrap_full_scan: bool = False,
     ):
         super().__init__(logger=logger, update_rate=update_rate, angle_range=angle_range)
 
@@ -61,20 +63,65 @@ class IterativeDOAEstimator(DOAEstimator):
 
         self.beamformer = beamformer
         self.scan_step_deg = float(scan_step_deg)
+        self.normalize_channels = bool(normalize_channels)
+        self.bootstrap_full_scan = bool(bootstrap_full_scan)
         self._last_update_time = 0.0
         self._latest_gain = None
 
+    def _compute_gain(self, block: np.ndarray, angle_deg: float) -> float:
+        beamformed = self.beamformer.apply(block, theta_deg=float(angle_deg))
+        beamformed_arr = np.asarray(beamformed, dtype=np.float64)
+        return float(np.mean(beamformed_arr * beamformed_arr))
+
+    def _initial_full_scan(self, block: np.ndarray) -> tuple[float, float] | None:
+        min_angle, max_angle = float(self.angle_range[0]), float(self.angle_range[1])
+        scan_angles = np.arange(min_angle, max_angle + 0.5 * self.scan_step_deg, self.scan_step_deg)
+        if scan_angles.size == 0:
+            return None
+
+        if min_angle <= 0.0 <= max_angle and not np.any(np.isclose(scan_angles, 0.0)):
+            scan_angles = np.append(scan_angles, 0.0)
+
+        angles = np.array(sorted(scan_angles.tolist(), key=lambda a: (abs(a), a)), dtype=np.float64)
+
+        best_angle = float(angles[0])
+        best_gain = -np.inf
+        for angle in angles:
+            try:
+                gain = self._compute_gain(block, float(angle))
+                self.logger.debug(f"Angle {angle:6.1f}° -> gain {gain:.6e}")
+                if gain > best_gain:
+                    best_gain = gain
+                    best_angle = float(angle)
+            except Exception as e:
+                self.logger.error(f"Error computing beamform for angle {angle}: {e}", exc_info=True)
+                continue
+
+        if not np.isfinite(best_gain):
+            return None
+        return best_angle, best_gain
+
+    def _normalize_block_channels(self, block: np.ndarray) -> np.ndarray:
+        """Normalize each channel RMS to reduce DOA bias from mic gain mismatch."""
+        arr = np.asarray(block, dtype=np.float64)
+        if arr.ndim != 2 or arr.shape[0] == 0:
+            return arr
+
+        eps = 1e-12
+        rms = np.sqrt(np.mean(arr * arr, axis=0) + eps)
+        return arr / rms[None, :]
+
     def estimate_doa(self, audio_block):
         """
-        Iteratively scan beamformer steering angles and pick the angle with max output gain.
+        Smooth DOA tracking using local bidirectional hill-climbing.
         
-        OPTIMIZED: Caches FFT of input block to avoid recomputing for each angle scan.
-        This reduces computation from O(6*N*log(N)) to O(N*log(N) + 6*N).
-
         Behavior:
-        - Scans only within self.angle_range
+        - First update performs one full scan to bootstrap initial DOA
+        - Subsequent updates evaluate only 3 angles: current, left step, right step
+        - Moves to neighbor only if its gain is higher than current gain
         - Updates at most self.update_rate times per second
         - Returns last valid DOA when frozen or before next update interval
+        - Works with any beamformer (DAS, MVDR, etc.)
         """
         if self.frozen:
             return self.latest_doa
@@ -91,80 +138,57 @@ class IterativeDOAEstimator(DOAEstimator):
         if (now - self._last_update_time) < min_interval:
             return self.latest_doa
 
+        block_for_doa = self._normalize_block_channels(block) if self.normalize_channels else np.asarray(block, dtype=np.float64)
+
+        # Bootstrap strategy when DOA is not initialized yet.
+        if self.latest_doa is None:
+            if self.bootstrap_full_scan:
+                init_result = self._initial_full_scan(block_for_doa)
+                if init_result is not None:
+                    self.latest_doa, self._latest_gain = init_result
+                    self._last_update_time = now
+                return self.latest_doa
+
+            # Default: initialize at 0° (or nearest bound) and use local search immediately.
+            min_angle, max_angle = float(self.angle_range[0]), float(self.angle_range[1])
+            if min_angle <= 0.0 <= max_angle:
+                self.latest_doa = 0.0
+            else:
+                self.latest_doa = float(np.clip(0.0, min_angle, max_angle))
+
         min_angle, max_angle = float(self.angle_range[0]), float(self.angle_range[1])
-        angles = np.arange(min_angle, max_angle + 0.5 * self.scan_step_deg, self.scan_step_deg)
-        if angles.size == 0:
-            return self.latest_doa
+        current_angle = float(np.clip(self.latest_doa, min_angle, max_angle))
+        left_angle = float(np.clip(current_angle - self.scan_step_deg, min_angle, max_angle))
+        right_angle = float(np.clip(current_angle + self.scan_step_deg, min_angle, max_angle))
 
-        best_angle = self.latest_doa if self.latest_doa is not None else min_angle
-        best_gain = -np.inf
+        # Keep order deterministic and remove duplicates (at boundaries).
+        candidate_angles = []
+        for a in (current_angle, left_angle, right_angle):
+            if not any(np.isclose(a, seen) for seen in candidate_angles):
+                candidate_angles.append(a)
 
-        # OPTIMIZATION: Pre-compute FFT once and reuse for all angles
-        # This is the key bottleneck - FFT is O(N*log(N)) and was being computed 6 times
-        selected = self.beamformer._select_channels(np.asarray(block, dtype=np.float64))
-        n_samples = selected.shape[0]
-        
-        # Compute FFT once
-        spectrum = np.fft.rfft(selected, axis=0)
-        channel_count = self.beamformer.channel_count
-        sample_rate = self.beamformer.sample_rate
-        
-        for angle in angles:
+        gain_by_angle: dict[float, float] = {}
+        for angle in candidate_angles:
             try:
-                # FAST PATH: Compute steering vector and apply to cached FFT
-                theta_rad = np.deg2rad(float(angle))
-                
-                # Compute steering matrix for this angle
-                freq_bins = np.fft.rfftfreq(n_samples, d=1.0 / sample_rate)
-                direction = np.array(
-                    [np.sin(theta_rad), 0.0, np.cos(theta_rad)],
-                    dtype=np.float64,
-                )
-                relative_positions = self.beamformer.mic_positions_m - self.beamformer.mic_positions_m[0]
-                delays = (relative_positions @ direction) / self.beamformer.sound_speed_m_s
-                steering = np.exp(-1j * 2.0 * np.pi * freq_bins[:, None] * delays[None, :])
-                
-                # Apply steering to cached spectrum (MVDR beamforming)
-                output_spectrum = np.zeros(spectrum.shape[0], dtype=np.complex128)
-                identity = np.eye(channel_count, dtype=np.complex128)
-                
-                for i in range(spectrum.shape[0]):
-                    x = spectrum[i, :].reshape(-1, 1)
-                    r_inst = x @ x.conj().T
-                    
-                    # Use 0.9 smoothing factor for stability
-                    covariance = 0.9 * np.eye(channel_count, dtype=np.complex128) + 0.1 * r_inst
-                    
-                    trace_r = np.trace(covariance).real
-                    loading = 1e-3 * (trace_r / channel_count + 1e-12)
-                    r_loaded = covariance + loading * identity
-                    
-                    a = steering[i, :].reshape(-1, 1)
-                    r_inv_a = np.linalg.pinv(r_loaded) @ a
-                    denom = (a.conj().T @ r_inv_a).item()
-                    
-                    if np.abs(denom) > 1e-12:
-                        w = r_inv_a / denom
-                    else:
-                        w = np.conj(steering[i, :]).reshape(-1, 1) / channel_count
-                    
-                    output_spectrum[i] = (w.conj().T @ x).item()
-                
-                # Compute output power
-                y_out = np.fft.irfft(output_spectrum, n=n_samples)
-                gain = float(np.mean(y_out * y_out))
-                
-                if gain > best_gain:
-                    best_gain = gain
-                    best_angle = float(angle)
-                    
+                gain = self._compute_gain(block_for_doa, angle)
+                gain_by_angle[angle] = gain
+                self.logger.debug(f"Angle {angle:6.1f}° -> gain {gain:.6e}")
             except Exception as e:
-                self.logger.debug(f"Error computing beamform for angle {angle}: {e}")
-                continue
+                self.logger.error(f"Error computing beamform for angle {angle}: {e}", exc_info=True)
 
-        if np.isfinite(best_gain):
-            self.latest_doa = best_angle
-            self._latest_gain = best_gain
+        if gain_by_angle:
+            current_gain = gain_by_angle.get(current_angle, -np.inf)
+            best_angle = max(gain_by_angle, key=gain_by_angle.get)
+            best_gain = gain_by_angle[best_angle]
+
+            # Move only if improved; otherwise keep current angle.
+            if best_gain > current_gain:
+                self.latest_doa = float(best_angle)
+                self._latest_gain = float(best_gain)
+            else:
+                self.latest_doa = current_angle
+                self._latest_gain = float(current_gain)
+
             self._last_update_time = now
 
         return self.latest_doa

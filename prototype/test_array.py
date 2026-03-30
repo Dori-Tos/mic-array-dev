@@ -18,6 +18,7 @@ import sounddevice as sd
 if __name__ == "__main__":
     script_dir = Path(__file__).resolve().parent
     sample_rate = 48000
+    downsample_rate = 16000  # Downsample from 48 kHz to 16 kHz for faster processing
     cutoff_freq = 6000.0
     order = 4
     monitor_gain = 0.2
@@ -59,10 +60,10 @@ if __name__ == "__main__":
     # DOA estimator uses fast DAS for scanning
     doa_estimator = IterativeDOAEstimator(
         logger=logger,
-        update_rate=1.0,
+        update_rate=3.0,
         angle_range=(-25, 25),
         beamformer=das_beamformer,  # Use DAS for fast DOA scanning
-        scan_step_deg=10.0,
+        scan_step_deg=5.0,
     )
     echo_canceller = EchoCanceller(logger=logger, sample_rate=sample_rate, channels=4)
     filters = [LowPassFilter(logger=logger, sample_rate=sample_rate, cutoff_freq=cutoff_freq, order=order)]
@@ -81,7 +82,8 @@ if __name__ == "__main__":
         filters=filters,
         agc=agc,
         codec=codec,
-        monitor_gain=monitor_gain
+        monitor_gain=monitor_gain,
+        downsample_rate=downsample_rate  # Process at 16kHz instead of 48kHz for ~3x speedup
     )
 
     array.start_realtime(blocksize=2048)

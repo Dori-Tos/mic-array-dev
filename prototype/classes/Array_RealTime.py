@@ -9,7 +9,7 @@ import queue
 import logging
 
 class Array_RealTime(Array):
-    def __init__(self, *args, logger: logging.Logger, monitor_gain: float = 0.2, **kwargs):
+    def __init__(self, *args, logger: logging.Logger, monitor_gain: float = 0.2, downsample_rate: int | None = None, **kwargs):
         super().__init__(*args, logger=logger, **kwargs)
         self._latest_block = None
         self._latest_per_mic = {}
@@ -17,12 +17,17 @@ class Array_RealTime(Array):
         self._latest_beamformed = None
         
         self.monitor_gain = monitor_gain
+        self.downsample_rate = downsample_rate  # Downsample to this rate (e.g., 16000 Hz)
         self._output_stream = None
         self._output_status_state = {"last_print": 0.0}
         
         # Audio processing queue and thread
         # Larger queue to handle slow processing without dropping blocks
         self._audio_queue = queue.Queue(maxsize=20)
+        self._queue_catchup_trigger = 6
+        self._queue_keep_depth = 2
+        self._skip_doa_queue_threshold = 4
+        self._last_catchup_log = 0.0
         self._processing_thread = None
         self._processing_stop_event = threading.Event()
 
@@ -108,14 +113,45 @@ class Array_RealTime(Array):
             except queue.Empty:
                 pass
 
+    def _downsample_block(self, block: np.ndarray) -> np.ndarray:
+        """
+        Downsample audio block using scipy.signal.decimate.
+        Input: (n_samples, n_channels), Output: downsampled (n_samples//decimation, n_channels)
+        Reduces computation significantly when working with high sample rates.
+        """
+        if self.downsample_rate is None or self.downsample_rate >= self.sampling_rate:
+            return block
+        
+        decimation_factor = self.sampling_rate // self.downsample_rate
+        if decimation_factor <= 1:
+            return block
+        
+        from scipy import signal
+        # Decimate first channel to determine actual output size
+        # (scipy.signal.decimate may produce slightly different size than input // factor)
+        ch0_decimated = signal.decimate(block[:, 0].astype(np.float32), decimation_factor, zero_phase=True)
+        
+        # Preallocate with correct output size
+        downsampled = np.zeros((len(ch0_decimated), block.shape[1]), dtype=np.float32)
+        downsampled[:, 0] = ch0_decimated
+        
+        # Decimate remaining channels
+        for ch in range(1, block.shape[1]):
+            downsampled[:, ch] = signal.decimate(block[:, ch].astype(np.float32), decimation_factor, zero_phase=True)
+        
+        return downsampled
+
     def _process_audio_thread(self):
         """
         Processing thread that handles computationally expensive operations:
         DOA estimation and beamforming. Runs independently from the audio callback.
         """
-        self.logger.info("Processing thread started")
+        self.logger.info(f"Processing thread started (downsample_rate: {self.downsample_rate})")
         block_count = 0
         start_time = time.monotonic()
+        
+        # Store original sample rate for restoration
+        self._original_sampling_rate = self.sampling_rate
         
         while not self._processing_stop_event.is_set():
             try:
@@ -127,6 +163,28 @@ class Array_RealTime(Array):
                 self.logger.debug("[Processing] Queue timeout, no block received")
                 continue
 
+            # Catch-up mode: when backlog grows, skip stale blocks and keep newest ones.
+            if queue_size > self._queue_catchup_trigger:
+                dropped_stale = 0
+                while self._audio_queue.qsize() > self._queue_keep_depth:
+                    try:
+                        block = self._audio_queue.get_nowait()
+                        dropped_stale += 1
+                    except queue.Empty:
+                        break
+                queue_size = self._audio_queue.qsize()
+                now_log = time.monotonic()
+                if dropped_stale > 0 and (now_log - self._last_catchup_log) > 0.5:
+                    self.logger.debug(f"[Catch-up] Dropped {dropped_stale} stale queued blocks, queue_size now {queue_size}")
+                    self._last_catchup_log = now_log
+
+            # Apply downsampling if needed
+            original_rate = self.sampling_rate
+            if self.downsample_rate is not None and self.downsample_rate < self.sampling_rate:
+                block = self._downsample_block(block)
+                self.sampling_rate = self.downsample_rate  # Temporarily change sample rate
+                self.logger.debug(f"[Processing] Downsampled to {self.downsample_rate} Hz, new block shape: {block.shape}")
+
             # Extract per-microphone samples
             per_mic = {}
             for idx, mic in enumerate(self.mic_list):
@@ -137,7 +195,11 @@ class Array_RealTime(Array):
             # Estimate DOA
             doa_value = None
             start_doa = time.monotonic()
-            if callable(self.doa_estimator.estimate_doa):
+            should_skip_doa = queue_size > self._skip_doa_queue_threshold and self._latest_doa is not None
+            if should_skip_doa:
+                doa_value = self._latest_doa
+                self.logger.debug(f"[Processing] Skipping DOA update due to backlog (queue_size={queue_size}), reusing {doa_value:.1f}°")
+            elif callable(self.doa_estimator.estimate_doa):
                 try:
                     self.logger.debug(f"[Processing] Starting DOA estimation")
                     doa_value = self.doa_estimator.estimate_doa(block)
@@ -171,6 +233,10 @@ class Array_RealTime(Array):
                 elapsed_bf = time.monotonic() - start_bf
                 self.logger.error(f"[Beamforming Error] {type(e).__name__}: {e} (after {elapsed_bf*1000:.2f}ms)")
                 beamformed_value = None
+            
+            # Restore original sample rate if downsampled
+            if self.sampling_rate != original_rate:
+                self.sampling_rate = original_rate
 
             # Store results
             total_time = time.monotonic() - start_doa
