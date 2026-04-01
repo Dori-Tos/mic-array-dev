@@ -4,6 +4,17 @@ import time
 import logging
 
 class DOAEstimator:
+    """
+    Base class for Direction of Arrival (DOA) estimation. Subclasses implement specific DOA estimation algorithms.
+    
+    :param logger: logging.Logger instance for logging messages.
+    :param update_rate: Maximum rate (in Hz) at which the DOA estimate is updated (default: 3.0). 
+        Higher values allow more frequent updates but increase computational load.
+    :param angle_range: Tuple specifying the minimum and maximum angles (in degrees) to consider
+        for DOA estimation (default: (-25, 25)). The estimator will only search for sources within this angular range.
+        
+    """
+    
     def __init__(self, logger: logging.Logger,
                  update_rate: float = 3.0, angle_range: tuple = (-25, 25)):
         
@@ -18,12 +29,14 @@ class DOAEstimator:
         self.update_rate = update_rate
         self.angle_range = angle_range
     
-    def freeze(self):
+    def freeze(self, angle_deg: float | None = None):
         """
         Freeze the DOA estimator to prevent further updates.
         """
         
         self.frozen = True
+        if angle_deg is not None:
+            self.latest_doa = angle_deg
     
     def unfreeze(self):
         """
@@ -44,6 +57,19 @@ class DOAEstimator:
     
     
 class IterativeDOAEstimator(DOAEstimator):
+    """
+    Iterative DOA estimator that performs a local search around the current DOA estimate to find the angle with the highest beamformed gain.
+    
+    :param logger: logging.Logger instance for logging messages.
+    :param update_rate: Maximum rate (in Hz) at which the DOA estimate is updated (default: 3.0).
+    :param angle_range: Tuple specifying the minimum and maximum angles (in degrees) to consider for DOA estimation (default: (-25, 25)).
+    :param beamformer: Beamformer instance to use for computing the beamformed output at different angles. This allows the DOA estimator to be flexible and work with any beamforming algorithm (e.g., DAS, MVDR).
+    :param scan_step_deg: Step size in degrees for scanning neighboring angles during the local search
+        (default: 1.0). Smaller steps may yield more accurate DOA estimates but increase computational load.
+    :param normalize_channels: If True, normalize each channel's RMS before DOA estimation to reduce bias from mic gain mismatch (default: True).
+    :param bootstrap_full_scan: If True, perform a full scan of the angle range on the first update to initialize the DOA estimate, rather than starting at 0° (default: False). This can help find the correct initial DOA if it's not near 0°.
+    """
+    
     def __init__(
         self,
         logger: logging.Logger,

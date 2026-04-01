@@ -12,7 +12,7 @@ from scipy import signal
 from collections import deque
 from math import gcd
 
-class Array_RealTime(Array):    
+class Array_RealTime(Array):
     """
     Real-time audio processing array class that extends the base Array with real-time capabilities.
     
@@ -20,17 +20,9 @@ class Array_RealTime(Array):
     :param monitor_gain: Gain factor applied to the beamformed output for monitoring through speakers (default: 0.35).
     :param downsample_rate: If set, downsample the input audio to this rate for processing
         (e.g., 16000 Hz) to reduce computational load. The original sample rate is restored after processing.
-    :param initial_silence_duration: Duration in seconds to silence output at startup while filters adapt (default: 2.0).
-        Set to 0 to disable. Filters often need 1-3 seconds to stabilize before sound quality is good.
     """ 
     
-    def __init__(self, *args, 
-            logger: logging.Logger, 
-            monitor_gain: float = 0.35, 
-            downsample_rate: int | None = None, 
-            initial_silence_duration: float = 2.0, **kwargs
-        ):
-        
+    def __init__(self, *args, logger: logging.Logger, monitor_gain: float = 0.35, downsample_rate: int | None = None, **kwargs):
         super().__init__(*args, logger=logger, **kwargs)
         self._latest_block = None
         self._latest_per_mic = {}
@@ -39,8 +31,6 @@ class Array_RealTime(Array):
         
         self.monitor_gain = monitor_gain
         self.downsample_rate = downsample_rate  # Downsample to this rate (e.g., 16000 Hz)
-        self.initial_silence_duration = float(initial_silence_duration)  # Silence duration (sec) at startup
-        self._stream_start_time = None  # Track when audio stream started
         self._output_playback_rate = self.sampling_rate
         self._output_stream = None
         self._output_status_state = {"last_print": 0.0}
@@ -49,11 +39,10 @@ class Array_RealTime(Array):
         self._output_current_chunk = np.zeros(0, dtype=np.float32)
         self._output_buffered_samples = 0
         self._output_max_buffer_samples = int(self._output_playback_rate * 1.0)
-        self._output_prev_sample = 0.0
-        self._output_fade_samples = max(128, int(self._output_playback_rate * 0.005))  # 5ms boundary fade to smooth polyphase resampling artifacts
 
         # Cache for downsampling internals so output-size probing is not repeated every block.
         self._downsample_cache_rate = None
+        self._downsample_cache_factor = None
         self._downsample_cache_in_len = None
         self._downsample_cache_channels = None
         self._downsample_scratch = None
@@ -147,42 +136,53 @@ class Array_RealTime(Array):
 
     def _downsample_block(self, block: np.ndarray) -> np.ndarray:
         """
-        Downsample audio block using vectorized polyphase resampling.
+        Downsample audio block using scipy.signal.decimate.
         
         Parameters:
         - block: Input audio block with shape (n_samples, n_channels)
         
         Output:
-        - downsampled block with shape (resampled_samples, n_channels)
+        - downsampled block with shape (n_samples//decimation_factor, n_channels)
         """
         if self.downsample_rate is None or self.downsample_rate >= self.sampling_rate:
+            return block
+        
+        decimation_factor = self.sampling_rate // self.downsample_rate
+        if decimation_factor <= 1:
             return block
 
         in_len, n_channels = block.shape
         cache_valid = (
             self._downsample_cache_rate == self.sampling_rate
+            and self._downsample_cache_factor == decimation_factor
             and self._downsample_cache_in_len == in_len
             and self._downsample_cache_channels == n_channels
             and self._downsample_scratch is not None
         )
 
         if not cache_valid:
-            out_probe = signal.resample_poly(block.astype(np.float32), self.downsample_rate, self.sampling_rate, axis=0)
-            self._downsample_scratch = np.empty_like(out_probe, dtype=np.float32)
+            # Probe once to capture exact output length for this config.
+            ch0_decimated = signal.decimate(block[:, 0].astype(np.float32), decimation_factor, zero_phase=True)
+            out_len = int(ch0_decimated.size)
+            self._downsample_scratch = np.empty((out_len, n_channels), dtype=np.float32)
+            self._downsample_scratch[:, 0] = ch0_decimated
 
             self._downsample_cache_rate = self.sampling_rate
+            self._downsample_cache_factor = decimation_factor
             self._downsample_cache_in_len = in_len
             self._downsample_cache_channels = n_channels
+        else:
+            self._downsample_scratch[:, 0] = signal.decimate(
+                block[:, 0].astype(np.float32), decimation_factor, zero_phase=True
+            )
 
-        downsampled = signal.resample_poly(block.astype(np.float32), self.downsample_rate, self.sampling_rate, axis=0)
-        if downsampled.shape != self._downsample_scratch.shape:
-            self._downsample_scratch = np.empty_like(downsampled, dtype=np.float32)
-            self._downsample_cache_in_len = in_len
-            self._downsample_cache_channels = n_channels
+        # Decimate remaining channels into cached scratch buffer.
+        for ch in range(1, n_channels):
+            self._downsample_scratch[:, ch] = signal.decimate(
+                block[:, ch].astype(np.float32), decimation_factor, zero_phase=True
+            )
 
-        self._downsample_scratch[:, :] = downsampled
-
-        # Return a copy because the scratch buffer is reused for the next block.
+        # Return a copy because the scratch buffer is reused on the next block.
         return self._downsample_scratch.copy()
 
     def _resample_to_playback_rate(self, mono: np.ndarray, in_rate: int) -> np.ndarray:
@@ -267,7 +267,7 @@ class Array_RealTime(Array):
                     self.logger.debug(f"[Processing] Starting DOA estimation")
                     doa_value = self.doa_estimator.estimate_doa(block)
                     elapsed_doa = time.monotonic() - start_doa
-                    self.logger.debug(f"[DOA] Estimated: {doa_value:.1f}° (took {elapsed_doa*1000:.2f}ms)")
+                    self.logger.info(f"[DOA] Estimated: {doa_value:.1f}° (took {elapsed_doa*1000:.2f}ms)")
                 except Exception as e:
                     elapsed_doa = time.monotonic() - start_doa
                     self.logger.error(f"[DOA Estimation Error] {type(e).__name__}: {e} (after {elapsed_doa*1000:.2f}ms)")
@@ -291,16 +291,6 @@ class Array_RealTime(Array):
                             # Queue audio chunk for real-time output playback
                             mono_raw = np.asarray(beamformed_arr, dtype=np.float32).reshape(-1)
                             peak = float(np.max(np.abs(mono_raw))) if mono_raw.size > 0 else 0.0
-                            
-                            # DIAGNOSTIC: Check for numerical issues in beamformer output
-                            # has_nan = np.any(np.isnan(mono_raw))
-                            # has_inf = np.any(np.isinf(mono_raw))
-                            # num_extreme = np.sum(np.abs(mono_raw) > 10.0)  # Values > 10.0 are extreme
-                            # if has_nan or has_inf or num_extreme > 0:
-                            #     self.logger.warning(
-                            #         f"[Beamformer Output] NaN:{has_nan} Inf:{has_inf} Extreme:{num_extreme} Peak:{peak:.4f}"
-                            #     )
-                            
                             # If values look int16-like, scale; otherwise keep as normalized float.
                             mono_out = mono_raw / 32768.0 if peak > 4.0 else mono_raw
                             # Apply optional post-beamforming filters before AGC.
@@ -312,7 +302,7 @@ class Array_RealTime(Array):
                                         self.logger.warning(f"[Filter] {type(filter_err).__name__}: {filter_err}")
                             output_sample_rate = self.downsample_rate if self.downsample_rate is not None else self.sampling_rate
                             mono_out = self.agc.process(mono_out, sample_rate=output_sample_rate)
-                            mono_out = mono_out * self.monitor_gain
+                            mono_out = np.clip(mono_out * self.monitor_gain, -0.95, 0.95)
                             processing_rate = self.downsample_rate if self.downsample_rate is not None else self.sampling_rate
                             mono_out = self._resample_to_playback_rate(mono_out, int(processing_rate))
                             with self._output_fifo_lock:
@@ -397,13 +387,11 @@ class Array_RealTime(Array):
         if self._output_stream is not None:
             return
 
-        self._stream_start_time = time.monotonic()  # Start timer for initial silence
         output_sample_rate = self._output_playback_rate
         with self._output_fifo_lock:
             self._output_fifo.clear()
             self._output_current_chunk = np.zeros(0, dtype=np.float32)
             self._output_buffered_samples = 0
-        self._output_prev_sample = 0.0
         
         self._output_stream = sd.OutputStream(
             samplerate=output_sample_rate,
@@ -429,7 +417,6 @@ class Array_RealTime(Array):
             self._output_fifo.clear()
             self._output_current_chunk = np.zeros(0, dtype=np.float32)
             self._output_buffered_samples = 0
-        self._output_prev_sample = 0.0
 
     def _output_callback(self, outdata, frames, time_info, status):
         """
@@ -461,26 +448,4 @@ class Array_RealTime(Array):
                 self._output_current_chunk = self._output_current_chunk[take:]
                 write_idx += take
 
-        # Apply initial silence period for filter adaptation
-        if self._stream_start_time is not None and self.initial_silence_duration > 0:
-            elapsed = time.monotonic() - self._stream_start_time
-            if elapsed < self.initial_silence_duration:
-                chunk[:] = 0.0  # Silence during adaptation period
-                self.logger.info(f"[Output] Adapting filters... {self.initial_silence_duration - elapsed:.1f}s remaining")
-
-        # Smooth boundary fade using inverted Hann window (strong at start, weak at end)
-        # to suppress polyphase resampler artifacts at FIFO chunk junctions.
-        if chunk.size > 0:
-            fade_n = min(self._output_fade_samples, chunk.size)
-            if fade_n > 0:
-                # Inverted Hann: starts high, ends low (smooth discontinuity at boundary)
-                hann_window = np.hanning(fade_n * 2)[:fade_n].astype(np.float32)
-                hann_fade = 1.0 - hann_window  # Invert: high at start, low at end
-                start = float(self._output_prev_sample)
-                end = float(chunk[0])
-                # Ramp from previous sample to current, weighted by inverted Hann
-                linear = np.linspace(start, end, num=fade_n, endpoint=False, dtype=np.float32)
-                chunk[:fade_n] = linear * hann_fade + chunk[:fade_n] * (1.0 - hann_fade)
-            self._output_prev_sample = float(chunk[-1])
-        
         outdata[:, 0] = np.clip(chunk, -1.0, 1.0)

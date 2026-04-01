@@ -16,6 +16,24 @@ import sounddevice as sd
 
 
 class Array:
+    """
+    Class representing a microphone array system that captures audio, estimates DOA, applies beamforming,
+    performs echo cancellation, filtering, AGC, and encoding.
+
+    :param id_vendor: USB vendor ID for the microphone array device.
+    :param id_product: USB product ID for the microphone array device.
+    :param mic_list: List of Microphone instances representing the individual microphones in the array.
+    :param sampling_rate: The sampling rate for audio capture and processing.
+    :param doa_estimator: An instance of a DOAEstimator subclass for estimating direction of arrival.
+    :param beamformer: An instance of a Beamformer subclass for applying spatial filtering.
+    :param echo_canceller: An instance of EchoCanceller for removing echo from the beamformed signal.
+    :param filters: A sequence of Filter instances to apply to the beamformed signal before AGC.
+    :param agc: An instance of AGC for automatic gain control on the processed signal.
+    :param codec: An instance of Codec for encoding the final output audio.
+    :param device_index: Optional index of the audio input device to use. If None, the default device is used.
+    """
+    
+    
     def __init__(self, logger: logging.Logger,
                  id_vendor, id_product, mic_list: list[Microphone], sampling_rate: int,
                  doa_estimator: DOAEstimator, beamformer: Beamformer, 
