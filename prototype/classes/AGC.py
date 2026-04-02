@@ -9,9 +9,8 @@ class Amplifier:
     Simple fixed-gain amplifier stage. Applies constant gain multiplication.
     Can be used before limiters or other AGC for output level control without modulation.
     
-    Parameters:
-    - gain: Linear gain factor (default: 4.0). E.g., gain=4.0 means 12dB amplification.
-    - max_output: Clamp output to this level to prevent hard clipping (default: 1.0).
+    :param gain: Linear gain factor (default: 4.0). E.g., gain=4.0 means 12dB amplification.
+    :param max_output: Clamp output to this level to prevent hard clipping (default: 1.0).
     """
     
     def __init__(self, logger: logging.Logger, gain: float = 4.0, max_output: float = 1.0):
@@ -42,6 +41,105 @@ class Amplifier:
         current_time = time.time()
         if current_time - self._last_log_time >= 1.0:
             self.logger.debug(f"[Amplifier] Gain: {self.gain:.2f}x | Peak before: {peak_before:.4f} → after: {peak_after:.4f}")
+            self._last_log_time = current_time
+        
+        return np.asarray(y, dtype=np.float32)
+
+
+class AdaptiveAmplifier:
+    """
+    Adaptive amplifier that estimates an appropriate baseline gain based on input statistics.
+    Unlike AGC, this adapts SLOWLY to find the right operating level, not to track a target output.
+    
+    **Design Philosophy**:
+    - Measures input RMS/peak to estimate what gain is needed
+    - Updates gain gradually (exponential smoothing) to avoid pumping
+    - Designed as a PRE-stage before AGC/Limiter (which handle fast dynamics)
+    
+    **Typical Usage**:
+    ```python
+    agc_chain = AGCChain(logger, stages=[
+        AdaptiveAmplifier(logger, target_rms=0.1, min_gain=1.0, max_gain=16.0),
+        PedalboardAGC(logger, ...)  # Handles limiter + compressor
+    ])
+    ```
+    
+    :param target_rms: Desired RMS level at amplifier output (default: 0.1 = -20dB).
+                       This is the BASELINE level aimed for (PedalboardAGC handles fine tuning).
+    :param min_gain: Minimum gain to prevent over-attenuation (default: 1.0).
+    :param max_gain: Maximum gain to prevent excessive amplification (default: 16.0 = 24dB).
+    :param adapt_alpha: Exponential smoothing factor for gain updates (default: 0.05 = slow).
+                        Smaller = slower adaptation (less pumping). Range: [0.01, 0.5].
+    :param rms_floor: Minimum RMS to avoid dividing by zero or boosting silence (default: 1e-4).
+    """
+    
+    def __init__(
+        self,
+        logger: logging.Logger,
+        target_rms: float = 0.1,
+        min_gain: float = 1.0,
+        max_gain: float = 16.0,
+        adapt_alpha: float = 0.05,
+        rms_floor: float = 1e-4,
+    ):
+        if target_rms <= 0:
+            raise ValueError("target_rms must be > 0")
+        if min_gain <= 0 or max_gain <= 0 or min_gain > max_gain:
+            raise ValueError("invalid min_gain/max_gain")
+        if not 0.01 <= adapt_alpha <= 0.5:
+            raise ValueError("adapt_alpha should be in [0.01, 0.5] for stable adaptation")
+        if rms_floor <= 0:
+            raise ValueError("rms_floor must be > 0")
+        
+        self.logger = logger
+        self.target_rms = float(target_rms)
+        self.min_gain = float(min_gain)
+        self.max_gain = float(max_gain)
+        self.adapt_alpha = float(adapt_alpha)
+        self.rms_floor = float(rms_floor)
+        self._eps = 1e-9
+        
+        self.current_gain = 1.0  # Start at unity gain
+        self._last_log_time = time.time()
+    
+    def reset(self):
+        self.current_gain = 1.0
+        self._last_log_time = time.time()
+    
+    def process(self, samples: np.ndarray, sample_rate: float) -> np.ndarray:
+        """
+        Apply adaptive amplification based on input RMS.
+        Gain adapts slowly to reach target_rms without pumping artifacts.
+        """
+        x = np.asarray(samples, dtype=np.float32).reshape(-1)
+        if x.size == 0:
+            return x
+        
+        # Measure input RMS and peak
+        rms = float(np.sqrt(np.mean(x * x) + self._eps))
+        peak = float(np.max(np.abs(x)))
+        current_time = time.time()
+        
+        # Calculate desired gain for this frame
+        rms_to_use = max(rms, self.rms_floor)  # Avoid boosting silence
+        desired_unclamped = self.target_rms / rms_to_use
+        desired_gain = float(np.clip(desired_unclamped, self.min_gain, self.max_gain))
+        
+        # Apply exponential smoothing to adapt gain slowly (avoid pumping)
+        self.current_gain += self.adapt_alpha * (desired_gain - self.current_gain)
+        self.current_gain = float(np.clip(self.current_gain, self.min_gain, self.max_gain))
+        
+        # Apply amplification
+        y = x * self.current_gain
+        peak_after = peak * self.current_gain
+        
+        # Debug logging (every 1 second)
+        if current_time - self._last_log_time >= 1.0:
+            self.logger.debug(
+                f"[AdaptiveAmplifier] Input RMS: {rms:.5f} | Target: {self.target_rms:.5f} | "
+                f"Desired gain: {desired_gain:.2f}x | Current gain: {self.current_gain:.2f}x | "
+                f"Peak before: {peak:.4f} → after: {peak_after:.4f}"
+            )
             self._last_log_time = current_time
         
         return np.asarray(y, dtype=np.float32)

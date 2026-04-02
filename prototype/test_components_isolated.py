@@ -9,7 +9,7 @@ from classes.DOAEstimator import IterativeDOAEstimator
 from classes.Beamformer import DASBeamformer, MVDRBeamformer
 from classes.EchoCanceller import EchoCanceller
 from classes.Filter import BandPassFilter, WienerFilter, SpectralSubtractionFilter
-from classes.AGC import AGC, TwoStageAGC, Amplifier, Limiter, PeakHoldAGC, AGCChain, PedalboardAGC
+from classes.AGC import AGC, TwoStageAGC, Amplifier, AdaptiveAmplifier, Limiter, PeakHoldAGC, AGCChain, PedalboardAGC
 from classes.Codec import G711Codec
 
 import time
@@ -18,22 +18,28 @@ from pathlib import Path
 import logging
 
 # TEST MODE: Choose which configuration to test
-TEST_MODE = 5  # 1-9, see descriptions below
+TEST_MODE = 0  # 0-9, see descriptions below
 
 """
+DIAGNOSTIC MODES (find where distortion starts):
+MODE 0: BEAMFORMER ONLY (minimal AGC) - isolate beamformer
 MODE 1: Beamformer ONLY (8x amplifier) - Switch MVDR/DAS
+
+MAIN MODES:
 MODE 2: BandPass + SLOW AGC (gate disabled)
 MODE 3: Wiener + SLOW AGC (gate disabled) - DIAGNOSE WIENER ARTIFACTS
 MODE 4: BandPass + Spectral Subtraction (NEW - simpler noise reduction)
-MODE 5: SpectralSubtraction + PedalboardAGC (4x amplifier, no clipping)
+MODE 5: SpectralSubtraction + PedalboardAGC (adaptive amp, natural voice)
 MODE 6: Full Clean (BandPass + SpectralSubtraction + PedalboardAGC)
+
+REFERENCE MODES:
 MODE 7: REFERENCE - BandPass + Wiener + FAST AGC (old problem baseline)
 MODE 8: REFERENCE - BandPass + Wiener + SLOW AGC (old test)
 MODE 9+: LEGACY - BandPass + Wiener + AMPLIFIER + PEAK-HOLD AGC
 """
 
 # BEAMFORMER CHOICE: Switch between MVDR and DAS to isolate beamformer artifacts
-USE_DAS = True  # Set to True to test with DAS instead of MVDR
+USE_DAS = False # Set to True to test with DAS instead of MVDR
 
 if __name__ == "__main__":
     script_dir = Path(__file__).resolve().parent
@@ -81,7 +87,7 @@ if __name__ == "__main__":
     doa_estimator.freeze(0.0)
     
     echo_canceller = EchoCanceller(logger=logger, sample_rate=sample_rate, channels=4)
-    
+       
     # SELECT BEAMFORMER: MVDR (current, may have artifacts) vs DAS (simpler, cleaner)
     if USE_DAS:
         selected_beamformer = das_beamformer
@@ -107,7 +113,14 @@ if __name__ == "__main__":
                    attack_ms=500.0, release_ms=5000.0, noise_floor_rms=10.0,  # DISABLED GATE (very high threshold)
                    gate_gain=1.0, gate_open_ms=100.0, gate_close_ms=500.0, gate_hold_ms=500.0)  # gate_gain=1.0 (no attenuation)
     
-    if TEST_MODE == 1:
+    if TEST_MODE == 0:
+        # DIAGNOSTIC: Beamformer ONLY (no echo canceller, check beamformer itself)
+        filters = []
+        agc = AGCChain(logger=logger, stages=[
+            Amplifier(logger=logger, gain=12.0, max_output=1.0)  # Unity gain
+        ])
+        desc = f"MODE 0: BEAMFORMER ONLY (unity gain) - using {beamformer_desc}"
+    elif TEST_MODE == 1:
         # Baseline: Beamformer only
         filters = []
         agc_fast = AGC(logger=logger, target_rms=10.0, min_gain=1.0, max_gain=1.0,
@@ -191,7 +204,7 @@ if __name__ == "__main__":
             ),
         ]
         agc = AGCChain(logger=logger, stages=[
-            Amplifier(logger=logger, gain=4.0, max_output=1.0),
+            Amplifier(logger=logger, gain=8.0, max_output=1.0),
             PedalboardAGC(
                 logger=logger,
                 sample_rate=sample_rate,
@@ -203,7 +216,7 @@ if __name__ == "__main__":
                 limiter_release_ms=50.0
             ),
         ])
-        desc = "MODE 5: BandPass + SpectralSubtraction + PedalboardAGC (4x amplifier, natural voice)"
+        desc = "MODE 5: BandPass + SpectralSubtraction + PedalboardAGC (adaptive amp, natural voice)"
     elif TEST_MODE == 6:
         # Full clean pipeline: BandPass + SpectralSubtraction + PedalboardAGC
         filters = [
@@ -223,7 +236,13 @@ if __name__ == "__main__":
             ),
         ]
         agc = AGCChain(logger=logger, stages=[
-            Amplifier(logger=logger, gain=4.0, max_output=1.0),
+            AdaptiveAmplifier(
+                logger=logger,
+                target_rms=0.1,
+                min_gain=1.0,
+                max_gain=16.0,
+                adapt_alpha=0.05,
+            ),
             PedalboardAGC(
                 logger=logger,
                 sample_rate=sample_rate,

@@ -1,6 +1,7 @@
 import scipy.signal as signal
 import numpy as np
 import logging
+from collections import deque
 
 class Filter:
     """

@@ -1,6 +1,5 @@
 from .Array import Array
 
-
 import time
 import numpy as np
 import sounddevice as sd
@@ -288,6 +287,7 @@ class Array_RealTime(Array):
                         beamformed_arr = np.asarray(beamformed)
                         if beamformed_arr.size > 0:
                             beamformed_value = beamformed_arr.copy()
+                            
                             # Queue audio chunk for real-time output playback
                             mono_raw = np.asarray(beamformed_arr, dtype=np.float32).reshape(-1)
                             peak = float(np.max(np.abs(mono_raw))) if mono_raw.size > 0 else 0.0
