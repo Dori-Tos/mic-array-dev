@@ -24,10 +24,10 @@ if __name__ == "__main__":
     mic_channel_numbers = [0, 1, 2, 3]
     
     logger = logging.getLogger("MicArrayTest")
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(logging.INFO)
     
     console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.DEBUG)
+    console_handler.setLevel(logging.INFO)
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
@@ -51,17 +51,33 @@ if __name__ == "__main__":
         mic_channel_numbers=mic_channel_numbers,
         sample_rate=sample_rate,
         mic_positions_m=mic_positions,
-        covariance_alpha=0.93,             # MODERATE: 0.93 - Balanced covariance adaptation
-                                           # Responds to source changes without over-reacting
-        diagonal_loading=0.08,             # BALANCED: 0.08 - Gentle regularization for stability
-                                           # Multi-source covariance stabilization without over-suppression
-        spectral_whitening_factor=0.06,    # CONSERVATIVE: 0.06 - Restrained adaptive loading
-                                           # Maintains noise suppression, avoids spurious whitening
-        weight_smooth_alpha=0.55,           # FAST: 0.55 (was 0.88) - Weights adapt quickly
-                                           # Prevents stale weights from lingering on side sources
-        max_adaptive_loading_scale=5.0,    # MODERATE: 5.0 (was 6.0) - Caps adaptive loading
-                                           # Prevents extreme over-regularization on low-SNR frames
+        # covariance_alpha=0.93,             # MODERATE: 0.93 - Balanced covariance adaptation
+        #                                    # Responds to source changes without over-reacting
+        # diagonal_loading=0.08,             # BALANCED: 0.08 - Gentle regularization for stability
+        #                                    # Multi-source covariance stabilization without over-suppression
+        # spectral_whitening_factor=0.06,    # CONSERVATIVE: 0.06 - Restrained adaptive loading
+        #                                    # Maintains noise suppression, avoids spurious whitening
+        # weight_smooth_alpha=0.55,           # FAST: 0.55 (was 0.88) - Weights adapt quickly
+        #                                    # Prevents stale weights from lingering on side sources
+        # max_adaptive_loading_scale=5.0,    # MODERATE: 5.0 (was 6.0) - Caps adaptive loading
+        #                                    # Prevents extreme over-regularization on low-SNR frames
+                                           
+        covariance_alpha=0.91,             # FASTER adaptation (was 0.93) - Better noise tracking
+                                           # Responds more quickly to source changes
+        diagonal_loading=0.15,             # INCREASED (was 0.08) - Stronger side-source rejection
+                                           # Higher regularization suppresses off-axis interference
+                                           # Trade-off: reduces directional response slightly but cuts side voices
+        spectral_whitening_factor=0.12,    # INCREASED (was 0.06) - More aggressive adaptive loading
+                                           # Pushes noise into higher frequencies where filters can catch it
+                                           # Keeps main lobe energy while suppressing diffuse noise
+        weight_smooth_alpha=0.72,          # SLOWER smoothing (was 0.55) - Reduces weight bumpiness
+                                           # Prevents rapid transients that cause distortion artifacts
+                                           # Smoother weights = cleaner main voice, less side distortion
+        max_adaptive_loading_scale=4.0,    # REDUCED (was 5.0) - Caps over-aggressive whitening
+                                           # Prevents extreme gain at low-SNR frequencies
     )
+
+    
 
     beamformer_choice = mvdr_beamformer
     
@@ -91,30 +107,79 @@ if __name__ == "__main__":
             logger=logger,
             sample_rate=sample_rate,
             noise_factor=0.9,
-            gain_floor=0.3,
+            gain_floor=0.2,
             noise_alpha=0.98,
             noise_update_snr_db=4.0,
         ),
+        
+        SpectralSubtractionFilter(
+            logger=logger,
+            sample_rate=sample_rate,
+            noise_factor=0.65,              # REDUCED (was 0.9) - Gentler subtraction
+                                            # Preserves more voice detail, fewer musical artifacts
+            gain_floor=0.35,                # INCREASED (was 0.2) - Preserve more signal
+                                            # Prevents aggressive suppression causing robotification
+            noise_alpha=0.99,               # INCREASED (was 0.98) - Slower noise adaptation
+                                            # Prevents chasing speech transients as noise
+            noise_update_snr_db=8.0,        # INCREASED (was 4.0) - Conservative noise updates
+                                            # More stable noise floor estimate
+        ),
+        
+        # WienerFilter(
+        #     logger=logger,
+        #     sample_rate=sample_rate,
+        #     noise_alpha=0.995,
+        #     gain_floor=0.015,
+        #     gain_smooth_alpha=0.75,
+        #     noise_update_snr_db=1.8,
+        #     noise_update_rms=1.5e-3,
+        #     pre_emphasis_db=3.0,
+        #     formant_preservation_db=2.0,
+        #     spectral_continuity_factor=0.55,
+        # ),
     ]
     
     agc = AGCChain(logger=logger, stages=[
+        # AdaptiveAmplifier(
+        #     logger=logger,
+        #     target_rms=0.1,           # Aim for -20dB baseline
+        #     min_gain=1.0,             # Don't over-suppress
+        #     max_gain=16.0,            # Allow 24dB max boost
+        #     adapt_alpha=0.05,         # Slow adaptation (avoid pumping)
+        # ),
+        
+        # PedalboardAGC(
+        #     logger=logger,
+        #     sample_rate=sample_rate,
+        #     threshold_db=-30.0,
+        #     ratio=4.0,
+        #     attack_ms=10.0,
+        #     release_ms=100.0,
+        #     limiter_threshold_db=-0.1,
+        #     limiter_release_ms=50.0
+        # ),
+        
         AdaptiveAmplifier(
             logger=logger,
-            target_rms=0.1,           # Aim for -20dB baseline
-            min_gain=1.0,             # Don't over-suppress
-            max_gain=16.0,            # Allow 24dB max boost
-            adapt_alpha=0.05,         # Slow adaptation (avoid pumping)
+            target_rms=0.08,          # LOWER (was 0.1) - Conservative baseline
+                                      # Prevents amplifying residual noise
+            min_gain=1.0,             # Floor: no suppression
+            max_gain=12.0,            # REDUCED (was 16.0) - Cap boost to 21.6dB
+                                      # Prevents amplifying background noise artifacts
+            adapt_alpha=0.04,         # SLOWER (was 0.05) - Smoother level tracking
         ),
         
         PedalboardAGC(
             logger=logger,
             sample_rate=sample_rate,
-            threshold_db=-30.0,
-            ratio=4.0,
-            attack_ms=10.0,
-            release_ms=100.0,
-            limiter_threshold_db=-0.1,
-            limiter_release_ms=50.0
+            threshold_db=-32.0,       # LOWERED (was -30) - Start compressing earlier
+                                      # Catches weak background noise before it peaks
+            ratio=5.0,                # INCREASED (was 4.0) - More aggressive compression
+                                      # Pushes residual noise down relative to speech peaks
+            attack_ms=8.0,            # FASTER (was 10) - Quicker gain reduction
+            release_ms=120.0,         # SLIGHTLY LONGER (was 100) - Smoother recovery
+            limiter_threshold_db=-0.5, # LOWER (was -0.1) - More headroom before clipping
+            limiter_release_ms=60.0   # LONGER (was 50) - Smoother limit release
         ),
     ])
         

@@ -129,11 +129,15 @@ class Array_RealTime(Array):
         """
         Minimal callback that just captures audio data and queues it for processing.
         This keeps the callback fast to avoid buffer overflows.
+        
+        Audio is normalized from int16 (±32768 from sounddevice) to float32 (±1.0) at capture.
+        This ensures all downstream components receive consistent normalized audio.
         """
         if status:
             self.logger.warning(f"[Audio callback] {status}")
         
-        block = np.copy(indata)
+        # Normalize int16 capture (±32768) to float32 (±1.0) immediately
+        block = np.copy(indata).astype(np.float32) / 32768.0
         try:
             self._audio_queue.put_nowait(block)
         except queue.Full:
@@ -301,8 +305,9 @@ class Array_RealTime(Array):
                             #         f"[Beamformer Output] NaN:{has_nan} Inf:{has_inf} Extreme:{num_extreme} Peak:{peak:.4f}"
                             #     )
                             
-                            # If values look int16-like, scale; otherwise keep as normalized float.
-                            mono_out = mono_raw / 32768.0 if peak > 4.0 else mono_raw
+                            # Audio is already normalized at capture (_audio_callback)
+                            # Beamformer receives [-1, 1] normalized input and outputs [-1, 1] range
+                            mono_out = mono_raw
                             # Apply optional post-beamforming filters before AGC.
                             for filt in self.filters:
                                 if callable(getattr(filt, "apply", None)):
@@ -350,7 +355,7 @@ class Array_RealTime(Array):
             if block_count % 5 == 0:
                 elapsed_total = time.monotonic() - start_time
                 blocks_per_sec = block_count / elapsed_total
-                self.logger.info(f"[Performance] Processed {block_count} blocks in {elapsed_total:.1f}s ({blocks_per_sec:.1f} blocks/sec), avg {total_time*1000:.0f}ms/block")
+                self.logger.debug(f"[Performance] Processed {block_count} blocks in {elapsed_total:.1f}s ({blocks_per_sec:.1f} blocks/sec), avg {total_time*1000:.0f}ms/block")
         
         total_time = time.monotonic() - start_time
         self.logger.info(f"Processing thread stopped after {block_count} blocks in {total_time:.1f}s")
