@@ -5,4 +5,5 @@ pandas
 
 pyusb
 sounddevice
+portaudio
 opuslib
