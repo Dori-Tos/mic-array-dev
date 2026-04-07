@@ -240,7 +240,14 @@ if __name__ == "__main__":
     #     Amplifier(logger=logger, gain=3.0, max_output=1.0),
     #     TwoStageAGC(logger=logger, stage1=agc_fast, stage2=agc_slow)
     # ])
-    codec = G711Codec(logger=logger)
+    codec = OpusCodec(
+        logger=logger,
+        bitrate=24000,
+        frame_duration_ms=20,
+        application="voip",
+        remote_host="172.98.1.61",
+        remote_port=5004,
+    )
 
     array = Array_RealTime(
         id_vendor=0x2752,
@@ -255,6 +262,7 @@ if __name__ == "__main__":
         agc=agc,
         codec=codec,
         monitor_gain=0.35,
+        output_mode="codec",
         downsample_rate=downsample_rate,
         initial_silence_duration=2.0,  # Silence first 2 seconds to let filters adapt
     )

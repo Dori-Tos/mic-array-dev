@@ -26,6 +26,7 @@ class Array_RealTime(Array):
     def __init__(self, *args, 
             logger: logging.Logger, 
             monitor_gain: float = 0.35, 
+            output_mode: str = "local",
             downsample_rate: int | None = None, 
             initial_silence_duration: float = 2.0, **kwargs
         ):
@@ -37,9 +38,13 @@ class Array_RealTime(Array):
         self._latest_beamformed = None
         
         self.monitor_gain = monitor_gain
+        self.output_mode = str(output_mode).strip().lower()
+        if self.output_mode not in ("local", "codec"):
+            raise ValueError("output_mode must be 'local' or 'codec'")
         self.downsample_rate = downsample_rate  # Downsample to this rate (e.g., 16000 Hz)
         self.initial_silence_duration = float(initial_silence_duration)  # Silence duration (sec) at startup
         self._stream_start_time = None  # Track when audio stream started
+        self._codec_stream_active = False
         self._output_playback_rate = self.sampling_rate
         self._output_stream = None
         self._output_status_state = {"last_print": 0.0}
@@ -200,6 +205,22 @@ class Array_RealTime(Array):
         down = int(in_rate // g)
         return signal.resample_poly(mono, up, down).astype(np.float32, copy=False)
 
+    def _send_codec_chunk(self, mono_out: np.ndarray, sample_rate: int):
+        if not self._codec_stream_active:
+            return
+        if self.codec is None:
+            return
+        try:
+            encode_packets = getattr(self.codec, "encode_packets", None)
+            if callable(encode_packets):
+                packets = encode_packets(mono_out, sample_rate)
+                self.codec.send_packets(packets)
+            else:
+                payload = self.codec.encode(mono_out, sample_rate)
+                self.codec.send_payload(payload)
+        except Exception as codec_err:
+            self.logger.warning(f"[Codec Output] {type(codec_err).__name__}: {codec_err}")
+
     def _process_audio_thread(self):
         """
         Processing thread that handles computationally expensive operations:
@@ -320,12 +341,16 @@ class Array_RealTime(Array):
                             mono_out = mono_out * self.monitor_gain
                             processing_rate = self.downsample_rate if self.downsample_rate is not None else self.sampling_rate
                             mono_out = self._resample_to_playback_rate(mono_out, int(processing_rate))
-                            with self._output_fifo_lock:
-                                self._output_fifo.append(mono_out)
-                                self._output_buffered_samples += mono_out.size
-                                while self._output_buffered_samples > self._output_max_buffer_samples and len(self._output_fifo) > 0:
-                                    old = self._output_fifo.popleft()
-                                    self._output_buffered_samples -= old.size
+
+                            if self.output_mode == "codec":
+                                self._send_codec_chunk(mono_out, int(processing_rate))
+                            else:
+                                with self._output_fifo_lock:
+                                    self._output_fifo.append(mono_out)
+                                    self._output_buffered_samples += mono_out.size
+                                    while self._output_buffered_samples > self._output_max_buffer_samples and len(self._output_fifo) > 0:
+                                        old = self._output_fifo.popleft()
+                                        self._output_buffered_samples -= old.size
                             elapsed_bf = time.monotonic() - start_bf
                             self.logger.debug(f"[Beamforming] Output shape: {beamformed_arr.shape} (took {elapsed_bf*1000:.2f}ms)")
                     else:
@@ -399,6 +424,16 @@ class Array_RealTime(Array):
         Start monitoring the beamformed audio output through the speaker.
         This opens an output stream and plays the latest beamformed audio.
         """
+        if self.output_mode == "codec":
+            if self.codec is None:
+                raise ValueError("Codec output mode selected but no codec instance is configured")
+            self._codec_stream_active = True
+            self._stream_start_time = time.monotonic()
+            target_host = getattr(self.codec, "remote_host", None)
+            target_port = getattr(self.codec, "remote_port", None)
+            self.logger.info(f"Codec output monitoring started -> {target_host}:{target_port}")
+            return
+
         if self._output_stream is not None:
             return
 
@@ -409,21 +444,82 @@ class Array_RealTime(Array):
             self._output_current_chunk = np.zeros(0, dtype=np.float32)
             self._output_buffered_samples = 0
         self._output_prev_sample = 0.0
-        
-        self._output_stream = sd.OutputStream(
-            samplerate=output_sample_rate,
-            channels=1,
-            dtype='float32',
-            latency='low',
-            blocksize=blocksize,
-            callback=self._output_callback,
-        )
-        self._output_stream.start()
+
+        stream_kwargs = {
+            "samplerate": output_sample_rate,
+            "channels": 1,
+            "dtype": "float32",
+            "latency": "low",
+            "blocksize": blocksize,
+            "callback": self._output_callback,
+        }
+
+        # Prefer configured/default output device, but recover automatically when
+        # PortAudio default output is invalid (common on Linux/RPi headless setups).
+        try:
+            default_device = sd.default.device
+            if isinstance(default_device, (tuple, list)) and len(default_device) >= 2:
+                default_out = default_device[1]
+                if isinstance(default_out, (int, np.integer)) and int(default_out) >= 0:
+                    stream_kwargs["device"] = int(default_out)
+        except Exception:
+            pass
+
+        try:
+            self._output_stream = sd.OutputStream(**stream_kwargs)
+            self._output_stream.start()
+            return
+        except Exception as open_err:
+            self.logger.warning(f"[Output] Failed to open default output device: {open_err}")
+
+        # Fallback: probe all output-capable devices and pick the first valid one.
+        try:
+            devices = sd.query_devices()
+            candidates = [
+                idx for idx, info in enumerate(devices)
+                if int(info.get("max_output_channels", 0)) > 0
+            ]
+            if not candidates:
+                raise RuntimeError("No output-capable audio devices found")
+
+            selected_device = None
+            for idx in candidates:
+                try:
+                    sd.check_output_settings(
+                        device=idx,
+                        channels=1,
+                        dtype="float32",
+                        samplerate=output_sample_rate,
+                    )
+                    selected_device = idx
+                    break
+                except Exception:
+                    continue
+
+            if selected_device is None:
+                selected_device = candidates[0]
+
+            stream_kwargs["device"] = int(selected_device)
+            self.logger.info(f"[Output] Using fallback output device index {selected_device}")
+            self._output_stream = sd.OutputStream(**stream_kwargs)
+            self._output_stream.start()
+        except Exception as fallback_err:
+            raise RuntimeError(f"Unable to open any output audio device: {fallback_err}") from fallback_err
 
     def stop_output_monitoring(self):
         """
         Stop the output monitoring stream.
         """
+        if self.output_mode == "codec":
+            self._codec_stream_active = False
+            close_transport = getattr(self.codec, "close_transport", None)
+            if callable(close_transport):
+                try:
+                    close_transport()
+                except Exception:
+                    pass
+            return
+
         if self._output_stream is None:
             return
         
