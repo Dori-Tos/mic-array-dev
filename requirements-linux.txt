@@ -1,0 +1,23 @@
+# System packages for Debian/Ubuntu/Raspberry Pi
+# Install with: sudo apt-get update && sudo apt-get install -y $(cat requirements-linux.txt | tr '\n' ' ')
+
+# Build/runtime basics
+build-essential
+python3-dev
+pkg-config
+
+# Audio stack (required by python-sounddevice / PortAudio)
+libasound2-dev
+libportaudio2
+portaudio19-dev
+alsa-utils
+
+# Optional codec/runtime helpers
+libopus0
+libopus-dev
+
+python3-gi
+python3-gst-1.0
+gir1.2-gstreamer-1.0
+gstreamer1.0-plugins-bad
+gstreamer1.0-tools
