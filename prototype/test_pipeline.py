@@ -243,7 +243,7 @@ if __name__ == "__main__":
     codec = OpusCodec(
         logger=logger,
         bitrate=24000,
-        frame_duration_ms=20,
+        frame_duration_ms=10,
         application="voip",
         remote_host="172.98.1.61",
         remote_port=5004,
@@ -262,12 +262,12 @@ if __name__ == "__main__":
         agc=agc,
         codec=codec,
         monitor_gain=0.35,
-        output_mode="local",  # "local" or "codec" 
+        output_mode="codec",  # "local" or "codec" 
         downsample_rate=downsample_rate,
         initial_silence_duration=2.0,  # Silence first 2 seconds to let filters adapt
     )
 
-    array.start_realtime(blocksize=2048)
+    array.start_realtime(blocksize=960)
     array.start_output_monitoring()
 
     try:

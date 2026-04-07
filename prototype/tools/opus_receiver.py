@@ -89,7 +89,7 @@ def main():
                 with fifo_lock:
                     audio_fifo.append(pcm)
                     # Keep bounded to avoid unlimited latency growth.
-                    while len(audio_fifo) > 100:
+                    while len(audio_fifo) > 12:
                         audio_fifo.popleft()
             except Exception:
                 continue
