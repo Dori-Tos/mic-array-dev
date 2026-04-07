@@ -103,14 +103,14 @@ if __name__ == "__main__":
             high_cutoff=4000.0, 
             order=4),
         
-        SpectralSubtractionFilter(
-            logger=logger,
-            sample_rate=sample_rate,
-            noise_factor=0.9,
-            gain_floor=0.2,
-            noise_alpha=0.98,
-            noise_update_snr_db=4.0,
-        ),
+        # SpectralSubtractionFilter(
+        #     logger=logger,
+        #     sample_rate=sample_rate,
+        #     noise_factor=0.9,
+        #     gain_floor=0.2,
+        #     noise_alpha=0.98,
+        #     noise_update_snr_db=4.0,
+        # ),
         
         SpectralSubtractionFilter(
             logger=logger,
@@ -262,7 +262,7 @@ if __name__ == "__main__":
         agc=agc,
         codec=codec,
         monitor_gain=0.35,
-        output_mode="codec",
+        output_mode="local",  # "local" or "codec" 
         downsample_rate=downsample_rate,
         initial_silence_duration=2.0,  # Silence first 2 seconds to let filters adapt
     )

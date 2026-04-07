@@ -140,3 +140,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
+    # Run via command line:
+    # .venv\Scripts\python.exe .\Python\Tests\mic-array-dev\prototype\tools\opus_receiver.py --port 5004
