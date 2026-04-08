@@ -5,7 +5,7 @@ from pathlib import Path
 import argparse
 
 
-def plot_directivity(csv_file, save_plot=True, save_location=None):
+def plot_directivity(csv_file, save_plot=True, save_location=None, reference_max_rms=None):
     """
     Plot directivity pattern from measurement data.
     
@@ -13,9 +13,28 @@ def plot_directivity(csv_file, save_plot=True, save_location=None):
         csv_file: Path to CSV file with directivity measurements
         save_plot: Whether to save plot to file (default: True)
         save_location: Optional path to save plot (if None, saves in same directory as CSV)
+        reference_max_rms: Optional external reference RMS value for recalculating dB values
+                          (allows comparing multiple measurements on same scale).
+                          If None, automatically uses the maximum RMS from the data as baseline.
     """
     # Load data
     df = pd.read_csv(csv_file)
+    
+    # Determine reference value for dB calculation
+    min_level = 1e-10
+    if reference_max_rms is not None:
+        # External reference provided by user
+        ref_value = reference_max_rms
+        ref_source = "external"
+    else:
+        # Automatically find maximum RMS as baseline
+        ref_value = df['rms_level'].max()
+        ref_source = "auto-detected (max RMS)"
+    
+    # Recalculate dB values using the reference
+    df['rms_dbfs'] = 20 * np.log10(np.maximum(df['rms_level'], min_level) / ref_value)
+    if 'peak_dbfs' in df.columns:
+        df['peak_dbfs'] = 20 * np.log10(np.maximum(df['peak_level'], min_level) / ref_value)
     
     # Detect CSV structure
     has_doa_angle = 'doa_angle' in df.columns
@@ -32,11 +51,9 @@ def plot_directivity(csv_file, save_plot=True, save_location=None):
     
     # Get reference RMS info for title
     reference_info = ""
-    if has_reference_rms:
-        ref_rms = df['reference_rms_used'].iloc[0]
-        # Convert to dBV (dB relative to 1V RMS)
-        ref_dbv = 20 * np.log10(ref_rms)
-        reference_info = f"\nReference: {ref_rms:.6f} V RMS ({ref_dbv:.1f} dBV)"
+    ref_rms = ref_value
+    ref_dbv = 20 * np.log10(ref_rms)
+    reference_info = f"\nReference ({ref_source}): {ref_rms:.6f} RMS ({ref_dbv:.1f} dB)"
     
     # Use multi-plot layout only for ReSpeaker with peaks
     if peaks_available and has_doa_angle:
@@ -174,12 +191,10 @@ def plot_directivity(csv_file, save_plot=True, save_location=None):
     print("Directivity Statistics:")
     print("="*60)
     
-    # Show reference info if available
-    if has_reference_rms:
-        ref_rms = df['reference_rms_used'].iloc[0]
-        ref_dbv = 20 * np.log10(ref_rms)
-        print(f"Reference RMS: {ref_rms:.6f} V ({ref_dbv:.1f} dBV)")
-        print()
+    # Show reference info
+    ref_dbv = 20 * np.log10(ref_value)
+    print(f"Reference RMS ({ref_source}): {ref_value:.6f} ({ref_dbv:.1f} dB)")
+    print()
     
     db_unit = "dBFS" if has_doa_angle else "dB"
     print(f"RMS Level:")
@@ -202,8 +217,18 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Plot ReSpeaker directivity measurements')
     parser.add_argument('csv_file', type=str, help='Path to CSV file with measurements')
     parser.add_argument('--no-save', action='store_true', help='Do not save plot to file')
-    parser.add_argument('--save-location', type=str, default=None, help='Optional directory to save plot (default: same as CSV)')
+    parser.add_argument('--save-location', type=str, default=".\Python\Tests\mic-array-dev\data\directivity\Multipass_70cm", help='Optional directory to save plot (default: same as CSV)')
+    parser.add_argument('--reference-max-rms', type=float, default=None,
+                        help='External reference max RMS value for normalizing dB (allows comparing multiple measurements)')
     
     args = parser.parse_args()
     
-    plot_directivity(args.csv_file, save_plot=not args.no_save, save_location=args.save_location)
+    plot_directivity(args.csv_file, save_plot=not args.no_save, save_location=args.save_location, reference_max_rms=args.reference_max_rms)
+
+    
+    # Example:
+    # .venv\Scripts\python.exe .\Python\Tests\mic-array-dev\respeaker\plot_directivity.py .\Python\Tests\mic-array-dev\data\directivity\Multipass_70cm\directivity_multipass_averaged_300_600.csv 
+    #
+    # The script automatically detects the maximum RMS as the baseline (0 dB reference).
+    # To use the same baseline across multiple measurements:
+    # .venv\Scripts\python.exe .\Python\Tests\mic-array-dev\respeaker\plot_directivity.py .\Python\Tests\mic-array-dev\data\directivity\Multipass_70cm\another_measurement.csv --reference-max-rms 47.22
