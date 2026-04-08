@@ -27,6 +27,7 @@ class Array_RealTime(Array):
             logger: logging.Logger, 
             monitor_gain: float = 0.35, 
             output_mode: str = "local",
+            output_boundary_fade_ms: float = 0.0,
             downsample_rate: int | None = None, 
             initial_silence_duration: float = 2.0, **kwargs
         ):
@@ -48,13 +49,19 @@ class Array_RealTime(Array):
         self._output_playback_rate = self.sampling_rate
         self._output_stream = None
         self._output_status_state = {"last_print": 0.0}
+        self._adapt_log_state = {
+            "started_logged": False,
+            "last_print": 0.0,
+            "setup_logged": False,
+        }
         self._output_fifo = deque()
         self._output_fifo_lock = threading.Lock()
         self._output_current_chunk = np.zeros(0, dtype=np.float32)
         self._output_buffered_samples = 0
         self._output_max_buffer_samples = int(self._output_playback_rate * 1.0)
         self._output_prev_sample = 0.0
-        self._output_fade_samples = max(128, int(self._output_playback_rate * 0.005))  # 5ms boundary fade to smooth polyphase resampling artifacts
+        fade_ms = max(0.0, float(output_boundary_fade_ms))
+        self._output_fade_samples = int(self._output_playback_rate * (fade_ms / 1000.0))
 
         # Cache for downsampling internals so output-size probing is not repeated every block.
         self._downsample_cache_rate = None
@@ -438,6 +445,11 @@ class Array_RealTime(Array):
             return
 
         self._stream_start_time = time.monotonic()  # Start timer for initial silence
+        self._adapt_log_state = {
+            "started_logged": False,
+            "last_print": 0.0,
+            "setup_logged": False,
+        }
         output_sample_rate = self._output_playback_rate
         with self._output_fifo_lock:
             self._output_fifo.clear()
@@ -531,6 +543,11 @@ class Array_RealTime(Array):
             self._output_current_chunk = np.zeros(0, dtype=np.float32)
             self._output_buffered_samples = 0
         self._output_prev_sample = 0.0
+        self._adapt_log_state = {
+            "started_logged": False,
+            "last_print": 0.0,
+            "setup_logged": False,
+        }
 
     def _output_callback(self, outdata, frames, time_info, status):
         """
@@ -567,19 +584,28 @@ class Array_RealTime(Array):
             elapsed = time.monotonic() - self._stream_start_time
             if elapsed < self.initial_silence_duration:
                 chunk[:] = 0.0  # Silence during adaptation period
-                self.logger.info(f"[Output] Adapting filters... {self.initial_silence_duration - elapsed:.1f}s remaining")
+                remaining = self.initial_silence_duration - elapsed
+                now = time.monotonic()
+                if not self._adapt_log_state["started_logged"]:
+                    self.logger.info(f"[Output] Adapting filters... {remaining:.1f}s remaining")
+                    self._adapt_log_state["started_logged"] = True
+                    self._adapt_log_state["last_print"] = now
+                elif (now - float(self._adapt_log_state["last_print"])) >= 1.0:
+                    self.logger.info(f"[Output] Adapting filters... {remaining:.1f}s remaining")
+                    self._adapt_log_state["last_print"] = now
+            elif not self._adapt_log_state["setup_logged"]:
+                self.logger.info("[Output] Filters are setup")
+                self._adapt_log_state["setup_logged"] = True
 
-        # Smooth boundary fade using inverted Hann window (strong at start, weak at end)
-        # to suppress polyphase resampler artifacts at FIFO chunk junctions.
+        # Optional boundary fade (disabled by default) to smooth hard chunk joins.
+        # Keeping this off avoids introducing periodic artifacts at block boundaries.
         if chunk.size > 0:
             fade_n = min(self._output_fade_samples, chunk.size)
             if fade_n > 0:
-                # Inverted Hann: starts high, ends low (smooth discontinuity at boundary)
                 hann_window = np.hanning(fade_n * 2)[:fade_n].astype(np.float32)
-                hann_fade = 1.0 - hann_window  # Invert: high at start, low at end
+                hann_fade = 1.0 - hann_window
                 start = float(self._output_prev_sample)
                 end = float(chunk[0])
-                # Ramp from previous sample to current, weighted by inverted Hann
                 linear = np.linspace(start, end, num=fade_n, endpoint=False, dtype=np.float32)
                 chunk[:fade_n] = linear * hann_fade + chunk[:fade_n] * (1.0 - hann_fade)
             self._output_prev_sample = float(chunk[-1])

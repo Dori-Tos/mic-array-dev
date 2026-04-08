@@ -62,22 +62,14 @@ if __name__ == "__main__":
         # max_adaptive_loading_scale=5.0,    # MODERATE: 5.0 (was 6.0) - Caps adaptive loading
         #                                    # Prevents extreme over-regularization on low-SNR frames
                                            
-        covariance_alpha=0.91,             # FASTER adaptation (was 0.93) - Better noise tracking
-                                           # Responds more quickly to source changes
-        diagonal_loading=0.15,             # INCREASED (was 0.08) - Stronger side-source rejection
-                                           # Higher regularization suppresses off-axis interference
+        covariance_alpha=0.95,             # Controls how quickly the covariance matrix adapts to new data
+        diagonal_loading=0.15,             # Higher regularization suppresses off-axis interference
                                            # Trade-off: reduces directional response slightly but cuts side voices
-        spectral_whitening_factor=0.12,    # INCREASED (was 0.06) - More aggressive adaptive loading
-                                           # Pushes noise into higher frequencies where filters can catch it
-                                           # Keeps main lobe energy while suppressing diffuse noise
-        weight_smooth_alpha=0.72,          # SLOWER smoothing (was 0.55) - Reduces weight bumpiness
-                                           # Prevents rapid transients that cause distortion artifacts
-                                           # Smoother weights = cleaner main voice, less side distortion
-        max_adaptive_loading_scale=4.0,    # REDUCED (was 5.0) - Caps over-aggressive whitening
-                                           # Prevents extreme gain at low-SNR frequencies
+        spectral_whitening_factor=0.12,    # Keeps main lobe energy while suppressing diffuse noise
+        weight_smooth_alpha=0.72,          # Smoother weights = cleaner main voice, less side distortion
+        max_adaptive_loading_scale=4.0,    # Prevents extreme gain at low-SNR frequencies
     )
 
-    
 
     beamformer_choice = mvdr_beamformer
     
@@ -115,14 +107,10 @@ if __name__ == "__main__":
         SpectralSubtractionFilter(
             logger=logger,
             sample_rate=sample_rate,
-            noise_factor=0.65,              # REDUCED (was 0.9) - Gentler subtraction
-                                            # Preserves more voice detail, fewer musical artifacts
-            gain_floor=0.35,                # INCREASED (was 0.2) - Preserve more signal
-                                            # Prevents aggressive suppression causing robotification
-            noise_alpha=0.99,               # INCREASED (was 0.98) - Slower noise adaptation
-                                            # Prevents chasing speech transients as noise
-            noise_update_snr_db=8.0,        # INCREASED (was 4.0) - Conservative noise updates
-                                            # More stable noise floor estimate
+            noise_factor=0.65,              # Aggressivenes of noise reduction 
+            gain_floor=0.35,                # Prevents aggressive suppression causing robotification
+            noise_alpha=0.99,               # Prevents chasing speech transients as noise
+            noise_update_snr_db=8.0,        #  More stable noise floor estimate
         ),
         
         # WienerFilter(
@@ -161,25 +149,21 @@ if __name__ == "__main__":
         
         AdaptiveAmplifier(
             logger=logger,
-            target_rms=0.08,          # LOWER (was 0.1) - Conservative baseline
-                                      # Prevents amplifying residual noise
-            min_gain=1.0,             # Floor: no suppression
-            max_gain=12.0,            # REDUCED (was 16.0) - Cap boost to 21.6dB
-                                      # Prevents amplifying background noise artifacts
-            adapt_alpha=0.04,         # SLOWER (was 0.05) - Smoother level tracking
+            target_rms=0.08,          # Boost normal speech toward target operating level
+            min_gain=1.0,             # Do NOT attenuate normal program material
+            max_gain=12.0,            # Allow enough lift for quieter speech
+            adapt_alpha=0.04,         # Balanced adaptation speed
         ),
         
         PedalboardAGC(
             logger=logger,
             sample_rate=sample_rate,
-            threshold_db=-32.0,       # LOWERED (was -30) - Start compressing earlier
-                                      # Catches weak background noise before it peaks
-            ratio=5.0,                # INCREASED (was 4.0) - More aggressive compression
-                                      # Pushes residual noise down relative to speech peaks
-            attack_ms=8.0,            # FASTER (was 10) - Quicker gain reduction
-            release_ms=120.0,         # SLIGHTLY LONGER (was 100) - Smoother recovery
-            limiter_threshold_db=-0.5, # LOWER (was -0.1) - More headroom before clipping
-            limiter_release_ms=60.0   # LONGER (was 50) - Smoother limit release
+            threshold_db=-20.0,       # Compress only above normal speech operating zone
+            ratio=3.5,                # Moderate peak control without flattening normal signal
+            attack_ms=3.0,            # Faster reaction for loud transients
+            release_ms=140.0,         # Smooth recovery to avoid pumping
+            limiter_threshold_db=-1.4, # Protect output from hard clipping on very loud bursts
+            limiter_release_ms=100.0  # Smoother limiter recovery
         ),
     ])
         
@@ -240,14 +224,19 @@ if __name__ == "__main__":
     #     Amplifier(logger=logger, gain=3.0, max_output=1.0),
     #     TwoStageAGC(logger=logger, stage1=agc_fast, stage2=agc_slow)
     # ])
-    codec = OpusCodec(
-        logger=logger,
-        bitrate=24000,
-        frame_duration_ms=10,
-        application="voip",
-        remote_host="172.98.1.61",
-        remote_port=5004,
-    )
+    output_mode = "local"  # "local" or "codec"
+    if output_mode == "codec":
+        codec = OpusCodec(
+            logger=logger,
+            bitrate=24000,
+            frame_duration_ms=10,
+            application="voip",
+            remote_host="172.98.1.61",
+            remote_port=5004,
+        )
+    else:
+        # In local mode, use a lightweight codec object; codec transport is not used.
+        codec = G711Codec(logger=logger)
 
     array = Array_RealTime(
         id_vendor=0x2752,
@@ -261,8 +250,9 @@ if __name__ == "__main__":
         filters=filters,
         agc=agc,
         codec=codec,
-        monitor_gain=0.35,
-        output_mode="codec",  # "local" or "codec" 
+        monitor_gain=monitor_gain,
+        output_mode=output_mode,
+        output_boundary_fade_ms=0.0,
         downsample_rate=downsample_rate,
         initial_silence_duration=2.0,  # Silence first 2 seconds to let filters adapt
     )
