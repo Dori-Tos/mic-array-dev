@@ -71,6 +71,17 @@ class AdaptiveAmplifier:
     :param adapt_alpha: Exponential smoothing factor for gain updates (default: 0.05 = slow).
                         Smaller = slower adaptation (less pumping). Range: [0.01, 0.5].
     :param rms_floor: Minimum RMS to avoid dividing by zero or boosting silence (default: 1e-4).
+    :param speech_activity_rms: RMS threshold below which the stage will avoid upward adaptation
+                                and decay gain toward min_gain (default: 0.001).
+    :param silence_decay_alpha: Per-frame decay factor used when rms < speech_activity_rms
+                                (default: 0.03). Smaller = slower return to min_gain.
+    :param activity_hold_ms: Hold time after recent speech activity before allowing silence decay
+                             (default: 450 ms). Prevents word/syllable dropouts.
+    :param peak_protect_threshold: Peak level above which desired gain is damped to protect
+                                   downstream compressor/limiter (default: 0.35).
+    :param peak_protect_strength: Strength of peak-based damping in [0,1] (default: 0.85).
+    :param max_gain_warn_rms_min: Minimum RMS required before emitting max-gain clamp warnings.
+                                  Prevents warning spam in near-silence (default: 0.001).
     """
     
     def __init__(
@@ -81,6 +92,12 @@ class AdaptiveAmplifier:
         max_gain: float = 16.0,
         adapt_alpha: float = 0.05,
         rms_floor: float = 1e-4,
+        speech_activity_rms: float = 0.001,
+        silence_decay_alpha: float = 0.03,
+        activity_hold_ms: float = 450.0,
+        peak_protect_threshold: float = 0.35,
+        peak_protect_strength: float = 0.85,
+        max_gain_warn_rms_min: float = 0.001,
     ):
         if target_rms <= 0:
             raise ValueError("target_rms must be > 0")
@@ -90,6 +107,18 @@ class AdaptiveAmplifier:
             raise ValueError("adapt_alpha should be in [0.01, 0.5] for stable adaptation")
         if rms_floor <= 0:
             raise ValueError("rms_floor must be > 0")
+        if speech_activity_rms <= 0:
+            raise ValueError("speech_activity_rms must be > 0")
+        if not 0.0 < silence_decay_alpha <= 0.5:
+            raise ValueError("silence_decay_alpha should be in (0.0, 0.5]")
+        if activity_hold_ms < 0:
+            raise ValueError("activity_hold_ms must be >= 0")
+        if not 0.0 < peak_protect_threshold < 1.0:
+            raise ValueError("peak_protect_threshold must be in (0, 1)")
+        if not 0.0 <= peak_protect_strength <= 1.0:
+            raise ValueError("peak_protect_strength must be in [0, 1]")
+        if max_gain_warn_rms_min < 0:
+            raise ValueError("max_gain_warn_rms_min must be >= 0")
         
         self.logger = logger
         self.target_rms = float(target_rms)
@@ -97,14 +126,26 @@ class AdaptiveAmplifier:
         self.max_gain = float(max_gain)
         self.adapt_alpha = float(adapt_alpha)
         self.rms_floor = float(rms_floor)
+        self.speech_activity_rms = float(speech_activity_rms)
+        self.silence_decay_alpha = float(silence_decay_alpha)
+        self.activity_hold_ms = float(activity_hold_ms)
+        self.peak_protect_threshold = float(peak_protect_threshold)
+        self.peak_protect_strength = float(peak_protect_strength)
+        self.max_gain_warn_rms_min = float(max_gain_warn_rms_min)
         self._eps = 1e-9
         
         self.current_gain = 1.0  # Start at unity gain
+        self._last_active_time = time.time()
         self._last_log_time = time.time()
+        self._last_max_gain_warn_time = 0.0
+        self._last_peak_warn_time = 0.0
     
     def reset(self):
         self.current_gain = 1.0
+        self._last_active_time = time.time()
         self._last_log_time = time.time()
+        self._last_max_gain_warn_time = 0.0
+        self._last_peak_warn_time = 0.0
     
     def process(self, samples: np.ndarray, sample_rate: float) -> np.ndarray:
         """
@@ -120,10 +161,44 @@ class AdaptiveAmplifier:
         peak = float(np.max(np.abs(x)))
         current_time = time.time()
         
-        # Calculate desired gain for this frame
-        rms_to_use = max(rms, self.rms_floor)  # Avoid boosting silence
-        desired_unclamped = self.target_rms / rms_to_use
-        desired_gain = float(np.clip(desired_unclamped, self.min_gain, self.max_gain))
+        # In low-activity frames, do not chase noise/silence upward. Instead, decay gain to min_gain.
+        is_active_frame = rms >= self.speech_activity_rms
+        if is_active_frame:
+            self._last_active_time = current_time
+        in_activity_hold = (current_time - self._last_active_time) <= (self.activity_hold_ms * 1e-3)
+
+        desired_unclamped = self.current_gain
+        if is_active_frame:
+            rms_to_use = max(rms, self.rms_floor)
+            desired_unclamped = self.target_rms / rms_to_use
+            desired_gain = float(np.clip(desired_unclamped, self.min_gain, self.max_gain))
+        elif in_activity_hold:
+            # Preserve gain briefly between speech segments to avoid dropping quiet syllables.
+            desired_gain = self.current_gain
+        else:
+            desired_gain = self.current_gain + self.silence_decay_alpha * (self.min_gain - self.current_gain)
+            desired_gain = float(np.clip(desired_gain, self.min_gain, self.max_gain))
+
+        # Peak-aware damping: when transient peaks are high, reduce allowed gain headroom.
+        if peak > self.peak_protect_threshold:
+            denom = max(1.0 - self.peak_protect_threshold, self._eps)
+            over_norm = float(np.clip((peak - self.peak_protect_threshold) / denom, 0.0, 1.0))
+            damping = 1.0 - (self.peak_protect_strength * over_norm)
+            damped_max_gain = self.min_gain + (self.max_gain - self.min_gain) * damping
+            desired_gain = min(desired_gain, float(np.clip(damped_max_gain, self.min_gain, self.max_gain)))
+
+        # Warn if desired gain is being clamped to max_gain.
+        # if (
+        #     is_active_frame
+        #     and rms >= self.max_gain_warn_rms_min
+        #     and desired_unclamped > self.max_gain
+        #     and (current_time - self._last_max_gain_warn_time) >= 1.0
+        # ):
+        #     self.logger.warning(
+        #         f"[AdaptiveAmplifier] Desired gain {desired_unclamped:.2f}x exceeds max_gain {self.max_gain:.2f}x; "
+        #         f"clamping to max. Input RMS={rms:.5f}, target_rms={self.target_rms:.5f}"
+        #     )
+        #     self._last_max_gain_warn_time = current_time
         
         # Apply exponential smoothing to adapt gain slowly (avoid pumping)
         self.current_gain += self.adapt_alpha * (desired_gain - self.current_gain)
@@ -132,13 +207,20 @@ class AdaptiveAmplifier:
         # Apply amplification
         y = x * self.current_gain
         peak_after = peak * self.current_gain
+
+        if peak_after > 1.0 and (current_time - self._last_peak_warn_time) >= 1.0:
+            self.logger.warning(
+                f"[AdaptiveAmplifier] Output peak {peak_after:.3f} exceeds 1.0 before downstream limiting/compression"
+            )
+            self._last_peak_warn_time = current_time
         
         # Debug logging (every 1 second)
         if current_time - self._last_log_time >= 1.0:
             self.logger.debug(
                 f"[AdaptiveAmplifier] Input RMS: {rms:.5f} | Target: {self.target_rms:.5f} | "
                 f"Desired gain: {desired_gain:.2f}x | Current gain: {self.current_gain:.2f}x | "
-                f"Peak before: {peak:.4f} → after: {peak_after:.4f}"
+                f"Peak before: {peak:.4f} → after: {peak_after:.4f} | "
+                f"ActiveFrame: {is_active_frame} | Hold: {in_activity_hold}"
             )
             self._last_log_time = current_time
         

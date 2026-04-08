@@ -54,6 +54,14 @@ class Array_RealTime(Array):
             "last_print": 0.0,
             "setup_logged": False,
         }
+        self._alert_state = {
+            "beamformer_peak_last": 0.0,
+            "post_agc_peak_last": 0.0,
+            "final_peak_last": 0.0,
+        }
+        self._warn_interval_s = 1.0
+        self._post_agc_warn_threshold = 0.98
+        self._final_warn_threshold = 0.98
         self._output_fifo = deque()
         self._output_fifo_lock = threading.Lock()
         self._output_current_chunk = np.zeros(0, dtype=np.float32)
@@ -323,6 +331,12 @@ class Array_RealTime(Array):
                             # Queue audio chunk for real-time output playback
                             mono_raw = np.asarray(beamformed_arr, dtype=np.float32).reshape(-1)
                             peak = float(np.max(np.abs(mono_raw))) if mono_raw.size > 0 else 0.0
+                            now_alert = time.monotonic()
+                            if peak > 1.0 and (now_alert - self._alert_state["beamformer_peak_last"]) >= self._warn_interval_s:
+                                self.logger.warning(
+                                    f"[Peak Alert] Beamformer output peak={peak:.3f} (>1.0). Upstream energy may be too high for headroom."
+                                )
+                                self._alert_state["beamformer_peak_last"] = now_alert
                             
                             # DIAGNOSTIC: Check for numerical issues in beamformer output
                             # has_nan = np.any(np.isnan(mono_raw))
@@ -345,7 +359,23 @@ class Array_RealTime(Array):
                                         self.logger.warning(f"[Filter] {type(filter_err).__name__}: {filter_err}")
                             output_sample_rate = self.downsample_rate if self.downsample_rate is not None else self.sampling_rate
                             mono_out = self.agc.process(mono_out, sample_rate=output_sample_rate)
+                            post_agc_peak = float(np.max(np.abs(mono_out))) if mono_out.size > 0 else 0.0
+                            if post_agc_peak >= self._post_agc_warn_threshold and (now_alert - self._alert_state["post_agc_peak_last"]) >= self._warn_interval_s:
+                                self.logger.warning(
+                                    f"[Peak Alert] Post-AGC peak={post_agc_peak:.3f} (threshold {self._post_agc_warn_threshold:.2f}). "
+                                    "Dynamics stage may be near saturation."
+                                )
+                                self._alert_state["post_agc_peak_last"] = now_alert
+
                             mono_out = mono_out * self.monitor_gain
+                            final_peak = float(np.max(np.abs(mono_out))) if mono_out.size > 0 else 0.0
+                            if final_peak >= self._final_warn_threshold and (now_alert - self._alert_state["final_peak_last"]) >= self._warn_interval_s:
+                                self.logger.warning(
+                                    f"[Peak Alert] Final monitor peak={final_peak:.3f} (threshold {self._final_warn_threshold:.2f}). "
+                                    "Output callback clipping risk is high."
+                                )
+                                self._alert_state["final_peak_last"] = now_alert
+
                             processing_rate = self.downsample_rate if self.downsample_rate is not None else self.sampling_rate
                             mono_out = self._resample_to_playback_rate(mono_out, int(processing_rate))
 

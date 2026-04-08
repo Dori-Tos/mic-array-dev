@@ -153,6 +153,12 @@ if __name__ == "__main__":
             min_gain=1.0,             # Do NOT attenuate normal program material
             max_gain=12.0,            # Allow enough lift for quieter speech
             adapt_alpha=0.04,         # Balanced adaptation speed
+            speech_activity_rms=0.00012,  # Treat lower-level speech as active (restore quiet voice audibility)
+            silence_decay_alpha=0.008,    # Slower decay to avoid dropping between words/syllables
+            activity_hold_ms=600.0,       # Hold gain after speech to preserve phrase continuity
+            peak_protect_threshold=0.35, # Start gain damping when peaks indicate loud transients
+            peak_protect_strength=0.85,  # Strong damping to reduce limiter stress on loud voice
+            max_gain_warn_rms_min=0.001, # Suppress max-gain warnings for near-silence frames
         ),
         
         PedalboardAGC(
