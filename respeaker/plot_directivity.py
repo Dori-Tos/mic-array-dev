@@ -5,7 +5,7 @@ from pathlib import Path
 import argparse
 
 
-def plot_directivity(csv_file, save_plot=True, save_location=None, reference_max_rms=None):
+def plot_directivity(csv_file, save_plot=True, save_location=None, reference_max_rms=None, min_scale=None):
     """
     Plot directivity pattern from measurement data.
     
@@ -16,6 +16,9 @@ def plot_directivity(csv_file, save_plot=True, save_location=None, reference_max
         reference_max_rms: Optional external reference RMS value for recalculating dB values
                           (allows comparing multiple measurements on same scale).
                           If None, automatically uses the maximum RMS from the data as baseline.
+        min_scale: Optional minimum dB value for graph scaling (e.g., -30 for -30 dB floor).
+                   If provided, all plots will use this as the minimum y-axis value.
+                   If None, y-axis uses autoscaling based on data.
     """
     # Load data
     df = pd.read_csv(csv_file)
@@ -76,6 +79,8 @@ def plot_directivity(csv_file, save_plot=True, save_location=None, reference_max
         ax1.set_title('RMS Level (dBFS)', pad=20, fontsize=12, fontweight='bold')
         ax1.grid(True)
         ax1.legend(loc='upper right')
+        if min_scale is not None:
+            ax1.set_ylim([min_scale, 0])
 
         # Polar plot for Peak level
         ax2 = plt.subplot(222, projection='polar')
@@ -89,6 +94,8 @@ def plot_directivity(csv_file, save_plot=True, save_location=None, reference_max
         ax2.set_title('Peak Level (dBFS)', pad=20, fontsize=12, fontweight='bold')
         ax2.grid(True)
         ax2.legend(loc='upper right')
+        if min_scale is not None:
+            ax2.set_ylim([min_scale, 0])
 
         # Cartesian plot comparing RMS and Peak
         ax3 = plt.subplot(223)
@@ -100,6 +107,8 @@ def plot_directivity(csv_file, save_plot=True, save_location=None, reference_max
         ax3.grid(True, alpha=0.3)
         ax3.legend()
         ax3.set_xlim([0, 360])
+        if min_scale is not None:
+            ax3.set_ylim([min_scale, 0])
 
         # DOA angle plot (or relative angle plot if beamformer is locked)
         ax4 = plt.subplot(224)
@@ -110,6 +119,8 @@ def plot_directivity(csv_file, save_plot=True, save_location=None, reference_max
             ax4.set_title('Directivity Pattern (Relative to Locked DOA)', fontsize=12, fontweight='bold')
             ax4.grid(True, alpha=0.3)
             ax4.set_xlim([0, 360])
+            if min_scale is not None:
+                ax4.set_ylim([min_scale, 0])
         elif has_doa_angle:
             ax4.plot(df['expected_angle'], df['doa_angle'], 'g-^', linewidth=2, markersize=4)
             ax4.set_xlabel('Expected Angle (degrees)', fontsize=10)
@@ -126,6 +137,8 @@ def plot_directivity(csv_file, save_plot=True, save_location=None, reference_max
             ax4.set_title('Directivity Pattern', fontsize=12, fontweight='bold')
             ax4.grid(True, alpha=0.3)
             ax4.set_xlim([0, 360])
+            if min_scale is not None:
+                ax4.set_ylim([min_scale, 0])
 
         # Add overall title with metadata
         test_name = Path(csv_file).stem
@@ -138,7 +151,12 @@ def plot_directivity(csv_file, save_plot=True, save_location=None, reference_max
         # Save plot
         if save_plot:
             if save_location:
-                output_file = Path(save_location) / f"{test_name}.png"
+                save_dir = Path(save_location)
+                # If save_location is a file, use its parent directory instead
+                if save_dir.is_file() or str(save_dir).endswith('.csv'):
+                    save_dir = save_dir.parent
+                save_dir.mkdir(parents=True, exist_ok=True)
+                output_file = save_dir / f"{test_name}.png"
             else:
                 output_file = Path(csv_file).with_suffix('.png')
             plt.savefig(output_file, dpi=300, bbox_inches='tight')
@@ -166,6 +184,8 @@ def plot_directivity(csv_file, save_plot=True, save_location=None, reference_max
             title += ' - Relative to Locked DOA'
         ax1.set_title(title, pad=20, fontsize=12, fontweight='bold')
         ax1.grid(True)
+        if min_scale is not None:
+            ax1.set_ylim([min_scale, 0])
 
         # Add overall title with metadata
         test_name = Path(csv_file).stem
@@ -178,7 +198,12 @@ def plot_directivity(csv_file, save_plot=True, save_location=None, reference_max
         # Save plot
         if save_plot:
             if save_location:
-                output_file = Path(save_location) / f"{test_name}.png"
+                save_dir = Path(save_location)
+                # If save_location is a file, use its parent directory instead
+                if save_dir.is_file() or str(save_dir).endswith('.csv'):
+                    save_dir = save_dir.parent
+                save_dir.mkdir(parents=True, exist_ok=True)
+                output_file = save_dir / f"{test_name}.png"
             else:
                 output_file = Path(csv_file).with_suffix('.png')
             plt.savefig(output_file, dpi=300, bbox_inches='tight')
@@ -217,13 +242,15 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Plot ReSpeaker directivity measurements')
     parser.add_argument('csv_file', type=str, help='Path to CSV file with measurements')
     parser.add_argument('--no-save', action='store_true', help='Do not save plot to file')
-    parser.add_argument('--save-location', type=str, default=".\Python\Tests\mic-array-dev\data\directivity\Multipass_70cm", help='Optional directory to save plot (default: same as CSV)')
+    parser.add_argument('--save-location', type=str, default=None, help='Optional directory to save plot (default: same directory as CSV file)')
     parser.add_argument('--reference-max-rms', type=float, default=None,
                         help='External reference max RMS value for normalizing dB (allows comparing multiple measurements)')
+    parser.add_argument('--min-scale', type=float, default=None,
+                        help='Minimum dB value for y-axis scaling (e.g., -30 for -30 dB floor). Allows consistent comparison between plots.')
     
     args = parser.parse_args()
     
-    plot_directivity(args.csv_file, save_plot=not args.no_save, save_location=args.save_location, reference_max_rms=args.reference_max_rms)
+    plot_directivity(args.csv_file, save_plot=not args.no_save, save_location=args.save_location, reference_max_rms=args.reference_max_rms, min_scale=args.min_scale)
 
     
     # Example:
@@ -232,3 +259,6 @@ if __name__ == '__main__':
     # The script automatically detects the maximum RMS as the baseline (0 dB reference).
     # To use the same baseline across multiple measurements:
     # .venv\Scripts\python.exe .\Python\Tests\mic-array-dev\respeaker\plot_directivity.py .\Python\Tests\mic-array-dev\data\directivity\Multipass_70cm\another_measurement.csv --reference-max-rms 47.22
+    #
+    # To set a fixed minimum dB scale (e.g., -30 dB) for consistent comparison:
+    # .venv\Scripts\python.exe .\Python\Tests\mic-array-dev\respeaker\plot_directivity.py .\Python\Tests\mic-array-dev\data\directivity\Multipass_70cm\directivity_multipass_averaged_300_600.csv --min-scale -30
