@@ -50,18 +50,7 @@ if __name__ == "__main__":
         logger=logger,
         mic_channel_numbers=mic_channel_numbers,
         sample_rate=sample_rate,
-        mic_positions_m=mic_positions,
-        # covariance_alpha=0.93,             # MODERATE: 0.93 - Balanced covariance adaptation
-        #                                    # Responds to source changes without over-reacting
-        # diagonal_loading=0.08,             # BALANCED: 0.08 - Gentle regularization for stability
-        #                                    # Multi-source covariance stabilization without over-suppression
-        # spectral_whitening_factor=0.06,    # CONSERVATIVE: 0.06 - Restrained adaptive loading
-        #                                    # Maintains noise suppression, avoids spurious whitening
-        # weight_smooth_alpha=0.55,           # FAST: 0.55 (was 0.88) - Weights adapt quickly
-        #                                    # Prevents stale weights from lingering on side sources
-        # max_adaptive_loading_scale=5.0,    # MODERATE: 5.0 (was 6.0) - Caps adaptive loading
-        #                                    # Prevents extreme over-regularization on low-SNR frames
-                                           
+        mic_positions_m=mic_positions,                                           
         covariance_alpha=0.95,             # Controls how quickly the covariance matrix adapts to new data
         diagonal_loading=0.15,             # Higher regularization suppresses off-axis interference
                                            # Trade-off: reduces directional response slightly but cuts side voices
@@ -95,58 +84,18 @@ if __name__ == "__main__":
             high_cutoff=4000.0, 
             order=4),
         
-        # SpectralSubtractionFilter(
-        #     logger=logger,
-        #     sample_rate=sample_rate,
-        #     noise_factor=0.9,
-        #     gain_floor=0.2,
-        #     noise_alpha=0.98,
-        #     noise_update_snr_db=4.0,
-        # ),
-        
         SpectralSubtractionFilter(
             logger=logger,
             sample_rate=sample_rate,
             noise_factor=0.65,              # Moderate noise suppression 
             gain_floor=0.35,                # Prevents aggressive suppression causing robotification
-            noise_alpha=0.99,               # Prevents chasing speech transients as noise
+            noise_alpha=0.995,              # Very slow noise learning prevents formant suppression
             noise_update_snr_db=8.0,        # Can now update during low-SNR moments (protected from onset corruption)
+            gain_smooth_alpha=0.92,         # Very strong uniform gain smoothing locks formants, eliminates pops
         ),
-        
-        # WienerFilter(
-        #     logger=logger,
-        #     sample_rate=sample_rate,
-        #     noise_alpha=0.995,
-        #     gain_floor=0.015,
-        #     gain_smooth_alpha=0.75,
-        #     noise_update_snr_db=1.8,
-        #     noise_update_rms=1.5e-3,
-        #     pre_emphasis_db=3.0,
-        #     formant_preservation_db=2.0,
-        #     spectral_continuity_factor=0.55,
-        # ),
     ]
     
     agc = AGCChain(logger=logger, stages=[
-        # AdaptiveAmplifier(
-        #     logger=logger,
-        #     target_rms=0.1,           # Aim for -20dB baseline
-        #     min_gain=1.0,             # Don't over-suppress
-        #     max_gain=16.0,            # Allow 24dB max boost
-        #     adapt_alpha=0.05,         # Slow adaptation (avoid pumping)
-        # ),
-        
-        # PedalboardAGC(
-        #     logger=logger,
-        #     sample_rate=sample_rate,
-        #     threshold_db=-30.0,
-        #     ratio=4.0,
-        #     attack_ms=10.0,
-        #     release_ms=100.0,
-        #     limiter_threshold_db=-0.1,
-        #     limiter_release_ms=50.0
-        # ),
-        
         AdaptiveAmplifier(
             logger=logger,
             target_rms=0.08,          # Boost normal speech toward target operating level

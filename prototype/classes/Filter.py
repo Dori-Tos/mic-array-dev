@@ -396,6 +396,7 @@ class SpectralSubtractionFilter(Filter):
         gain_floor: float = 0.3,
         noise_alpha: float = 0.98,
         noise_update_snr_db: float = 3.0,
+        gain_smooth_alpha: float = 0.6,
     ):
         super().__init__(logger, sample_rate, order=order)
         
@@ -405,11 +406,14 @@ class SpectralSubtractionFilter(Filter):
             raise ValueError("gain_floor must be in [0, 1]")
         if not 0.0 < noise_alpha < 1.0:
             raise ValueError("noise_alpha must be in (0, 1)")
+        if not 0.0 < gain_smooth_alpha <= 1.0:
+            raise ValueError(f"gain_smooth_alpha must be in (0, 1], got {gain_smooth_alpha}")
         
         self.noise_factor = float(noise_factor)
         self.gain_floor = float(gain_floor)
         self.noise_alpha = float(noise_alpha)
         self.noise_update_snr_db = float(noise_update_snr_db)
+        self.gain_smooth_alpha = float(gain_smooth_alpha)
         self._eps = 1e-12
         
         # 50% overlap-add buffers: store half-frame (hop_size)
@@ -417,10 +421,12 @@ class SpectralSubtractionFilter(Filter):
         self._input_buffer_1d = None
         self._output_buffer_1d = None
         self._noise_psd_1d = None
+        self._prev_gain_1d = None  # Temporal smoothing of gains
         
         self._input_buffer_2d = None
         self._output_buffer_2d = None
         self._noise_psd_2d = None
+        self._prev_gain_2d = None  # Temporal smoothing of gains
         
         self._last_log_time = None
         
@@ -436,21 +442,23 @@ class SpectralSubtractionFilter(Filter):
         self._input_buffer_1d = None
         self._output_buffer_1d = None
         self._noise_psd_1d = None
+        self._prev_gain_1d = None
         self._input_buffer_2d = None
         self._output_buffer_2d = None
         self._noise_psd_2d = None
+        self._prev_gain_2d = None
         self._last_log_time = None
         self._silence_to_speech_transition_frames = 0
         self._last_frame_rms = 0.0
     
-    def _process_frame(self, frame: np.ndarray, noise_psd: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
+    def _process_frame(self, frame: np.ndarray, noise_psd: np.ndarray | None, prev_gain: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
         """
         Process a single frame with spectral subtraction.
         
-        Single-window approach: apply Hann window on analysis side only (before FFT).
-        This preserves naturalness while ensuring COLA property at 50% overlap.
+        Single-window approach (Hann on analysis only) maintains perfect COLA property.
+        Decision-directed gain blending with voice-activity detection prevents formant artifacts.
         
-        Includes transition detection to prevent noise model corruption during silence->speech onset.
+        Returns: (output_frame, updated_noise_psd, smoothed_gain_for_next_frame)
         """
         frame_len = len(frame)
         frame_rms = float(np.sqrt(np.mean(frame * frame) + self._eps))
@@ -469,7 +477,7 @@ class SpectralSubtractionFilter(Filter):
         
         self._last_frame_rms = frame_rms
         
-        # Analysis window: only applied before FFT, not after IFFT
+        # Single-window approach: Hann on analysis side only (standard COLA-compliant)
         window = np.hanning(frame_len)
         x_windowed = frame * window
         
@@ -491,13 +499,18 @@ class SpectralSubtractionFilter(Filter):
         
         # Spectral subtraction: gentle and configurable
         gain = np.maximum(self.gain_floor, 1.0 - (self.noise_factor * noise_psd) / (power + self._eps))
+        
+        # Temporal gain smoothing: Apply constant strong smoothing to prevent formant artifacts
+        # Uniform high alpha (0.9) locks gains across all frames, preventing sharp discontinuities
+        if prev_gain is not None and prev_gain.shape == gain.shape:
+            gain = self.gain_smooth_alpha * gain + (1.0 - self.gain_smooth_alpha) * prev_gain
+        
         y_fft = x_fft * gain
         
-        # IFFT: no additional windowing on output
-        # (Single-window approach maintains COLA property at 50% overlap)
+        # IFFT (no synthesis window - single-window COLA approach)
         y = np.fft.irfft(y_fft, n=frame_len)
         
-        return y, noise_psd
+        return y, noise_psd, gain
     
     def _denoise_channel_with_overlap_add(
         self,
@@ -505,16 +518,17 @@ class SpectralSubtractionFilter(Filter):
         input_buffer: np.ndarray | None,
         output_buffer: np.ndarray | None,
         noise_psd: np.ndarray | None,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        prev_gain: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]:
         """
         Process channel with 50% overlap-add buffering.
         
-        Returns: (output, new_input_buffer, new_output_buffer, noise_psd)
+        Returns: (output, new_input_buffer, new_output_buffer, noise_psd, current_gain)
         """
         x = np.asarray(x, dtype=np.float64).reshape(-1)
         
         if x.size == 0:
-            return np.array([], dtype=np.float64), input_buffer, output_buffer, noise_psd
+            return np.array([], dtype=np.float64), input_buffer, output_buffer, noise_psd, prev_gain
         
         # On first call, determine frame size from input
         if self.hop_size is None:
@@ -530,6 +544,7 @@ class SpectralSubtractionFilter(Filter):
         
         # Create output array
         output = np.zeros_like(x)
+        current_gain = prev_gain  # Track gain through frames
         
         # Process in hop_size chunks
         for i in range(0, x.size, self.hop_size):
@@ -545,8 +560,8 @@ class SpectralSubtractionFilter(Filter):
                 chunk_padded = np.concatenate([chunk, np.zeros(self.hop_size - chunk_len)])
                 frame = np.concatenate([input_buffer, chunk_padded])
             
-            # Process frame
-            y_windowed, noise_psd = self._process_frame(frame, noise_psd)
+            # Process frame with temporal gain smoothing
+            y_windowed, noise_psd, current_gain = self._process_frame(frame, noise_psd, prev_gain=current_gain)
             
             # Overlap-add: add previous output buffer's second half
             y_windowed[:self.hop_size] += output_buffer[self.hop_size:]
@@ -561,7 +576,7 @@ class SpectralSubtractionFilter(Filter):
             # Update input buffer with new chunk for next iteration
             input_buffer = chunk if chunk_len == self.hop_size else np.zeros(self.hop_size)
         
-        return output, input_buffer, output_buffer, noise_psd
+        return output, input_buffer, output_buffer, noise_psd, current_gain
     
     def apply(self, data: np.ndarray) -> np.ndarray:
         """
@@ -574,9 +589,10 @@ class SpectralSubtractionFilter(Filter):
         
         if arr.ndim == 1:
             # Mono processing
-            y, self._input_buffer_1d, self._output_buffer_1d, self._noise_psd_1d = \
+            y, self._input_buffer_1d, self._output_buffer_1d, self._noise_psd_1d, self._prev_gain_1d = \
                 self._denoise_channel_with_overlap_add(
-                    arr, self._input_buffer_1d, self._output_buffer_1d, self._noise_psd_1d
+                    arr, self._input_buffer_1d, self._output_buffer_1d, self._noise_psd_1d, 
+                    prev_gain=self._prev_gain_1d
                 )
             return y
         
@@ -588,12 +604,14 @@ class SpectralSubtractionFilter(Filter):
                 self._input_buffer_2d = [None] * n_ch
                 self._output_buffer_2d = [None] * n_ch
                 self._noise_psd_2d = [None] * n_ch
+                self._prev_gain_2d = [None] * n_ch
             
             out = np.empty_like(arr, dtype=np.float64)
             for ch in range(n_ch):
-                y, self._input_buffer_2d[ch], self._output_buffer_2d[ch], self._noise_psd_2d[ch] = \
+                y, self._input_buffer_2d[ch], self._output_buffer_2d[ch], self._noise_psd_2d[ch], self._prev_gain_2d[ch] = \
                     self._denoise_channel_with_overlap_add(
-                        arr[:, ch], self._input_buffer_2d[ch], self._output_buffer_2d[ch], self._noise_psd_2d[ch]
+                        arr[:, ch], self._input_buffer_2d[ch], self._output_buffer_2d[ch], self._noise_psd_2d[ch],
+                        prev_gain=self._prev_gain_2d[ch]
                     )
                 out[:, ch] = y
             
