@@ -107,10 +107,10 @@ if __name__ == "__main__":
         SpectralSubtractionFilter(
             logger=logger,
             sample_rate=sample_rate,
-            noise_factor=0.65,              # Aggressivenes of noise reduction 
+            noise_factor=0.65,              # Moderate noise suppression 
             gain_floor=0.35,                # Prevents aggressive suppression causing robotification
             noise_alpha=0.99,               # Prevents chasing speech transients as noise
-            noise_update_snr_db=8.0,        #  More stable noise floor estimate
+            noise_update_snr_db=8.0,        # Can now update during low-SNR moments (protected from onset corruption)
         ),
         
         # WienerFilter(
@@ -173,63 +173,7 @@ if __name__ == "__main__":
         ),
     ])
         
-    # filters = [
-    #     # Filters now at 48kHz to avoid resampling artifact amplification
-    #     BandPassFilter(
-    #         logger=logger, 
-    #         sample_rate=filter_rate, 
-    #         low_cutoff=300.0,       # Below: Rumble
-    #         high_cutoff=4000.0,     # Above: Hiss
-    #         order=4),
-        
-    #     WienerFilter(
-    #         logger=logger,
-    #         sample_rate=filter_rate,
-    #         noise_alpha=0.995,
-    #         gain_floor=0.015,
-    #         gain_smooth_alpha=0.75,
-    #         noise_update_snr_db=1.8,
-    #         noise_update_rms=1.5e-3,
-    #         pre_emphasis_db=3.0,
-    #         formant_preservation_db=2.0,
-    #         spectral_continuity_factor=0.55,
-    #     ),
-    # ]
-    # agc_fast = AGC(
-    #     logger=logger,
-    #     target_rms=0.003,        # LOUDER: 0.003 (was 0.002, allows higher peaks)
-    #                              # Improves voice audibility without distortion
-    #     min_gain=0.6,            # MODERATE: 0.6 (was 0.5 too low, 0.7 original)
-    #                              # Allows background suppression without over-attenuation
-    #     max_gain=8.0,
-    #     attack_ms=35.0,
-    #     release_ms=200.0,
-    #     noise_floor_rms=0.0,
-    #     gate_gain=1.0,
-    #     gate_open_ms=30.0,
-    #     gate_close_ms=150.0,
-    #     gate_hold_ms=20.0,
-    # )
-    # agc_slow = AGC(
-    #     logger=logger,
-    #     target_rms=0.012,        # LOUDER makeup: 0.012 (was 0.008, more generous gain)
-    #                              # Boosts overall volume without excessive amplification
-    #     min_gain=0.8,            # BALANCED: 0.8 (was 0.7 too low, 0.9 original)
-    #                              # Suppress background moderately
-    #     max_gain=7.0,            # MODERATE: 9.0 (was 8.0 too restrictive, 10.0 original)
-    #                              # Allow some makeup without over-amplifying
-    #     attack_ms=125.0,
-    #     release_ms=2200.0,
-    #     noise_floor_rms=5.0,    
-    #     gate_gain=1.0,          
-    #     gate_open_ms=30.0,
-    #     gate_close_ms=150.0,
-    #     gate_hold_ms=100.0,
-    # )
-    # agc = AGCChain(logger=logger, stages=[
-    #     Amplifier(logger=logger, gain=3.0, max_output=1.0),
-    #     TwoStageAGC(logger=logger, stage1=agc_fast, stage2=agc_slow)
-    # ])
+    
     output_mode = "local"  # "local" or "codec"
     if output_mode == "codec":
         codec = OpusCodec(
@@ -260,7 +204,7 @@ if __name__ == "__main__":
         output_mode=output_mode,
         output_boundary_fade_ms=0.0,
         downsample_rate=downsample_rate,
-        initial_silence_duration=2.0,  # Silence first 2 seconds to let filters adapt
+        initial_silence_duration=2.0,  # Silence period for baseline learning (filter protects against corruption during onset)
     )
 
     array.start_realtime(blocksize=960)

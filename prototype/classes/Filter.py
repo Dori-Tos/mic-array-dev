@@ -423,6 +423,13 @@ class SpectralSubtractionFilter(Filter):
         self._noise_psd_2d = None
         
         self._last_log_time = None
+        
+        # State tracking: prevent corruption during silence-to-speech transition
+        self._silence_to_speech_transition_frames = 0
+        self._max_transition_frames = 60  # ~1.25 seconds at 48kHz with 960-sample blocks
+        self._last_frame_rms = 0.0
+        self._silence_threshold_rms = 0.001  # < 1 mV = silence
+
     
     def reset(self):
         """Reset all state."""
@@ -433,6 +440,8 @@ class SpectralSubtractionFilter(Filter):
         self._output_buffer_2d = None
         self._noise_psd_2d = None
         self._last_log_time = None
+        self._silence_to_speech_transition_frames = 0
+        self._last_frame_rms = 0.0
     
     def _process_frame(self, frame: np.ndarray, noise_psd: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
         """
@@ -440,27 +449,44 @@ class SpectralSubtractionFilter(Filter):
         
         Single-window approach: apply Hann window on analysis side only (before FFT).
         This preserves naturalness while ensuring COLA property at 50% overlap.
+        
+        Includes transition detection to prevent noise model corruption during silence->speech onset.
         """
         frame_len = len(frame)
+        frame_rms = float(np.sqrt(np.mean(frame * frame) + self._eps))
+        
+        # Detect silence-to-speech transition: RMS jumps significantly
+        is_silence = frame_rms < self._silence_threshold_rms
+        was_silence = self._last_frame_rms < self._silence_threshold_rms
+        
+        if was_silence and not is_silence:
+            # Transition from silence to speech detected
+            self._silence_to_speech_transition_frames = self._max_transition_frames
+        
+        # Decrement transition counter each frame
+        if self._silence_to_speech_transition_frames > 0:
+            self._silence_to_speech_transition_frames -= 1
+        
+        self._last_frame_rms = frame_rms
         
         # Analysis window: only applied before FFT, not after IFFT
-        # (Single-window approach for natural voice quality)
         window = np.hanning(frame_len)
-        
-        # Apply analysis window
         x_windowed = frame * window
         
         # FFT
         x_fft = np.fft.rfft(x_windowed)
         power = (np.abs(x_fft) ** 2).astype(np.float64, copy=False)
         
-        # Initialize or update noise PSD
+        # Initialize or update noise PSD (with transition protection)
         if noise_psd is None or noise_psd.shape != power.shape:
             noise_psd = power.copy()
         else:
-            frame_rms = float(np.sqrt(np.mean(frame * frame) + self._eps))
             snr_db = 10.0 * np.log10((np.mean(power) + self._eps) / (np.mean(noise_psd) + self._eps))
-            if snr_db < self.noise_update_snr_db:
+            
+            # Only update noise model if:
+            # 1. SNR is low (actual noise state)
+            # 2. AND we're NOT in speech-onset transition (prevents corruption)
+            if snr_db < self.noise_update_snr_db and self._silence_to_speech_transition_frames == 0:
                 noise_psd = self.noise_alpha * noise_psd + (1.0 - self.noise_alpha) * power
         
         # Spectral subtraction: gentle and configurable
