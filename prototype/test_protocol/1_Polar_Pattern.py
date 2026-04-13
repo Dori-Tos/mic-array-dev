@@ -306,11 +306,10 @@ def test_polar_pattern(
                 
                 all_measurements.append(measurement)
                 
-                # Progress indicator
-                if (meas_idx + 1) % 10 == 0:
-                    print(f"  Pass {pass_num + 1}, Measurement {meas_idx + 1}/{resolution}: "
-                          f"Angle: {expected_angle:6.1f}° | RMS: {20*np.log10(max(rms_level, 1e-10)):7.2f} dB | "
-                          f"Peak: {20*np.log10(max(peak_level, 1e-10)):7.2f} dB")
+                # Progress indicator for every measurement so the cadence matches the resolution.
+                print(f"  Pass {pass_num + 1}, Measurement {meas_idx + 1}/{resolution}: "
+                        f"Angle: {expected_angle:6.1f}° | RMS: {20*np.log10(max(rms_level, 1e-10)):7.2f} dB | "
+                        f"Peak: {20*np.log10(max(peak_level, 1e-10)):7.2f} dB")
         
     except KeyboardInterrupt:
         print("\n\nMeasurement interrupted by user")
