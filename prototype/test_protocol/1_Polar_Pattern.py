@@ -405,8 +405,8 @@ if __name__ == '__main__':
                         choices=['clockwise', 'counterclockwise'],
                         default='counterclockwise',
                         help='Direction of turntable rotation (default: counterclockwise)')
-    parser.add_argument('--output', type=str, default='data/polar_pattern',
-                        help='Output directory (default: data/polar_pattern)')
+    parser.add_argument('--output', type=str, default='data/test_protocol/polar_pattern',
+                        help='Output directory (default: data/test_protocol/polar_pattern)')
     parser.add_argument('--reference-angle', type=int, default=0,
                         help='Initial microphone pointing direction (default: 0°)')
     parser.add_argument('--no-pipeline', action='store_true',
@@ -471,4 +471,4 @@ if __name__ == '__main__':
     # python prototype/test_protocol/1_Polar_Pattern.py --device 1 --passes 3 --resolution 50 --rotation-time 120 --wait-between-passes
     #
     # With manual synchronization and front directivity only:
-    # python prototype/test_protocol/1_Polar_Pattern.py --device 1 --passes 3 --resolution 50 --rotation-time 90 --wait-between-passes --quarter-rotation
+    # python prototype/test_protocol/1_Polar_Pattern.py --device 1 --passes 3 --resolution 30 --rotation-time 22.5 --wait-between-passes --quarter-rotation
