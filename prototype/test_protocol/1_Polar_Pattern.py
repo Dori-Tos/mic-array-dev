@@ -50,6 +50,7 @@ def test_polar_pattern(
     use_pipeline=True,
     wait_between_passes=False,
     quarter_rotation=False,
+    alternate_rotation_direction=True,
     freeze_beamformer=True,
     freeze_angle_deg=0.0,
     save_on_interrupt=False,
@@ -78,6 +79,8 @@ def test_polar_pattern(
         wait_between_passes: If True, wait for Enter key before starting next pass
         quarter_rotation: If True, measure only front 90° instead of full 360° (faster)
                          Useful for measuring front directivity and mirroring afterwards
+        alternate_rotation_direction: If True, alternate direction each pass.
+                         If False, keep the same rotation_direction for all passes.
         freeze_beamformer: If True, keep steering fixed to freeze_angle_deg for all measurements
         freeze_angle_deg: Steering angle used when freeze_beamformer is enabled
         save_on_interrupt: If True, save partial data when interrupted by Ctrl+C.
@@ -124,6 +127,7 @@ def test_polar_pattern(
     print(f"  Measurement interval: {interval:.2f} seconds")
     print(f"  Sample duration: {sample_duration} seconds")
     print(f"  Rotation direction: {rotation_direction}")
+    print(f"  Alternate direction each pass: {'ON' if alternate_rotation_direction else 'OFF'}")
     print(f"  Microphone reference angle: {reference_angle}°")
     print(f"  Total test duration: ~{num_passes * resolution * interval / 60:.1f} minutes")
     print(f"  Output directory: {output_path}")
@@ -285,10 +289,13 @@ def test_polar_pattern(
     
     try:
         for pass_num in range(num_passes):
-            # Alternate direction: odd passes = counterclockwise, even passes = clockwise
-            pass_rotation_direction = rotation_direction if pass_num % 2 == 0 else (
-                'clockwise' if rotation_direction == 'counterclockwise' else 'counterclockwise'
-            )
+            # Optional alternating direction across passes.
+            if alternate_rotation_direction:
+                pass_rotation_direction = rotation_direction if pass_num % 2 == 0 else (
+                    'clockwise' if rotation_direction == 'counterclockwise' else 'counterclockwise'
+                )
+            else:
+                pass_rotation_direction = rotation_direction
             
             print(f"\n{'='*70}")
             print(f"PASS {pass_num + 1}/{num_passes} - Direction: {pass_rotation_direction.upper()}")
@@ -514,6 +521,8 @@ if __name__ == '__main__':
                         help='Wait for Enter key before starting each new pass')
     parser.add_argument('--quarter-rotation', action='store_true',
                         help='Measure only front 90° instead of full 360° (useful for measuring front directivity and mirroring afterwards)')
+    parser.add_argument('--alternate-rotation-direction', action=argparse.BooleanOptionalAction, default=False,
+                        help='Alternate rotation direction at each pass (default: disabled)')
     parser.add_argument('--freeze-beamformer', action=argparse.BooleanOptionalAction, default=True,
                         help='Freeze beamformer steering during the full measurement run (default: enabled)')
     parser.add_argument('--freeze-angle', type=float, default=0.0,
@@ -553,6 +562,7 @@ if __name__ == '__main__':
         use_pipeline=not args.no_pipeline,
         wait_between_passes=args.wait_between_passes,
         quarter_rotation=args.quarter_rotation,
+        alternate_rotation_direction=args.alternate_rotation_direction,
         freeze_beamformer=args.freeze_beamformer,
         freeze_angle_deg=args.freeze_angle,
         save_on_interrupt=args.save_on_interrupt,
