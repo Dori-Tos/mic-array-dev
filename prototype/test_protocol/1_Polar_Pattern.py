@@ -92,6 +92,7 @@ def test_polar_pattern(
     total_degrees = 90 if quarter_rotation else 360
     degrees_per_measurement = total_degrees / resolution
     interval = seconds_per_rotation * (degrees_per_measurement / 360)  # Time per measurement point
+    pass_duration = seconds_per_rotation * (total_degrees / 360.0)
     
     # Get device info
     if device_index is None:
@@ -136,6 +137,12 @@ def test_polar_pattern(
             f"  WARNING: sample_duration ({sample_duration:.3f}s) is greater than interval ({interval:.3f}s)."
             " Requested rotation cadence cannot be reached with blocking captures;"
             " effective spacing will be >= sample_duration + processing time."
+        )
+    theoretical_max_points = int(max(1, np.floor(pass_duration / max(sample_duration, 1e-6))))
+    if theoretical_max_points < resolution:
+        print(
+            f"  WARNING: Requested resolution ({resolution}) is higher than time budget allows "
+            f"for this pass duration/sample duration (theoretical max ~{theoretical_max_points} before processing overhead)."
         )
     print(f"{'='*70}\n")
     
@@ -287,22 +294,32 @@ def test_polar_pattern(
                 input(f"Press Enter to start pass {pass_num + 1}/{num_passes}...")
                 print()
 
-            # Absolute-time scheduler to avoid interval drift and accidental interval+duration spacing.
-            next_measurement_time = time.time()
-            
-            for meas_idx in range(resolution):
-                # Calculate expected angle based on rotation direction and measurement range
-                if pass_rotation_direction == 'counterclockwise':
-                    angle_offset = (meas_idx * degrees_per_measurement)
-                else:
-                    angle_offset = total_degrees - (meas_idx * degrees_per_measurement)
-                
-                expected_angle = (reference_angle + angle_offset) % 360
-                
-                # Wait until scheduled measurement time.
-                time_to_wait = next_measurement_time - time.time()
+            # Time-based synchronization: angle is derived from real elapsed time,
+            # so reported angle stays aligned to physical rotation.
+            pass_start_time = time.time()
+            pass_end_time = pass_start_time + pass_duration
+            next_measurement_time = pass_start_time
+            meas_idx = 0
+
+            while meas_idx < resolution:
+                now = time.time()
+                if now >= pass_end_time:
+                    break
+
+                # Keep capture starts roughly paced by requested interval when possible.
+                time_to_wait = next_measurement_time - now
                 if time_to_wait > 0:
                     time.sleep(time_to_wait)
+
+                # Preview angle (for logging/errors) based on current elapsed time.
+                now_for_angle = time.time()
+                elapsed_preview = np.clip(now_for_angle - pass_start_time, 0.0, pass_duration)
+                progress_preview = elapsed_preview / pass_duration if pass_duration > 0 else 0.0
+                if pass_rotation_direction == 'counterclockwise':
+                    angle_offset_preview = progress_preview * total_degrees
+                else:
+                    angle_offset_preview = total_degrees - (progress_preview * total_degrees)
+                expected_angle_preview = (reference_angle + angle_offset_preview) % 360
                 
                 # Record audio sample (4-channel for beamforming)
                 try:
@@ -314,7 +331,7 @@ def test_polar_pattern(
                         blocking=True
                     )
                 except Exception as e:
-                    logger.error(f"Error recording audio at angle {expected_angle:.1f}°: {e}")
+                    logger.error(f"Error recording audio at angle {expected_angle_preview:.1f}°: {e}")
                     continue
                 
                 # Ensure audio is float32 and normalized to [-1, 1]
@@ -342,6 +359,17 @@ def test_polar_pattern(
                 # Calculate RMS and peak levels
                 rms_level = np.sqrt(np.mean(processed_audio ** 2))
                 peak_level = np.max(np.abs(processed_audio))
+
+                # Compute expected angle from elapsed real time at the CENTER of the capture window.
+                # This keeps angle labels synchronized with turntable motion even under load.
+                capture_mid_time = time.time() - (sample_duration * 0.5)
+                elapsed = np.clip(capture_mid_time - pass_start_time, 0.0, pass_duration)
+                progress = elapsed / pass_duration if pass_duration > 0 else 0.0
+                if pass_rotation_direction == 'counterclockwise':
+                    angle_offset = progress * total_degrees
+                else:
+                    angle_offset = total_degrees - (progress * total_degrees)
+                expected_angle = (reference_angle + angle_offset) % 360
                 
                 # Store measurement
                 measurement = {
@@ -364,6 +392,13 @@ def test_polar_pattern(
 
                 # Schedule next measurement from absolute timeline, not loop execution time.
                 next_measurement_time += interval
+                meas_idx += 1
+
+            if meas_idx < resolution:
+                print(
+                    f"  Pass {pass_num + 1}: captured {meas_idx}/{resolution} samples before rotation window ended "
+                    f"({pass_duration:.2f}s)."
+                )
         
     except KeyboardInterrupt:
         print("\n\nMeasurement interrupted by user")
