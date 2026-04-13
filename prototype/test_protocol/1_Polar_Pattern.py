@@ -130,6 +130,13 @@ def test_polar_pattern(
             print(f"  Beamformer freeze angle: {float(freeze_angle_deg):.1f}°")
     else:
         print(f"  Processing: Raw audio only")
+
+    if sample_duration > interval:
+        print(
+            f"  WARNING: sample_duration ({sample_duration:.3f}s) is greater than interval ({interval:.3f}s)."
+            " Requested rotation cadence cannot be reached with blocking captures;"
+            " effective spacing will be >= sample_duration + processing time."
+        )
     print(f"{'='*70}\n")
     
     # Setup logging
@@ -245,10 +252,11 @@ def test_polar_pattern(
             if wait_between_passes and pass_num > 0:
                 input(f"Press Enter to start pass {pass_num + 1}/{num_passes}...")
                 print()
+
+            # Absolute-time scheduler to avoid interval drift and accidental interval+duration spacing.
+            next_measurement_time = time.time()
             
             for meas_idx in range(resolution):
-                measurement_start = time.time()
-                
                 # Calculate expected angle based on rotation direction and measurement range
                 if pass_rotation_direction == 'counterclockwise':
                     angle_offset = (meas_idx * degrees_per_measurement)
@@ -257,8 +265,8 @@ def test_polar_pattern(
                 
                 expected_angle = (reference_angle + angle_offset) % 360
                 
-                # Wait for the measurement interval
-                time_to_wait = interval - (time.time() - measurement_start)
+                # Wait until scheduled measurement time.
+                time_to_wait = next_measurement_time - time.time()
                 if time_to_wait > 0:
                     time.sleep(time_to_wait)
                 
@@ -319,6 +327,9 @@ def test_polar_pattern(
                 print(f"  Pass {pass_num + 1}, Measurement {meas_idx + 1}/{resolution}: "
                         f"Angle: {expected_angle:6.1f}° | RMS: {20*np.log10(max(rms_level, 1e-10)):7.2f} dB | "
                         f"Peak: {20*np.log10(max(peak_level, 1e-10)):7.2f} dB")
+
+                # Schedule next measurement from absolute timeline, not loop execution time.
+                next_measurement_time += interval
         
     except KeyboardInterrupt:
         print("\n\nMeasurement interrupted by user")
