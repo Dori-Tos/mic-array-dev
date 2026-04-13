@@ -439,9 +439,18 @@ def test_polar_pattern(
     
     # Calculate averaged results by angle
     print("Averaging measurements across passes...")
+
+    # IMPORTANT: expected_angle is time-derived float, so values differ slightly across passes.
+    # Bin to the intended angular grid before averaging to avoid sawtooth high/low alternation.
+    rel_angle = (df_all['expected_angle'] - reference_angle) % 360.0
+    bin_idx = np.floor((rel_angle + (degrees_per_measurement * 0.5)) / degrees_per_measurement).astype(int)
+    bin_idx = np.clip(bin_idx, 0, resolution - 1)
+    df_all['angle_bin'] = bin_idx
+    df_all['expected_angle_binned'] = (reference_angle + df_all['angle_bin'] * degrees_per_measurement) % 360.0
+    df_all['relative_angle_binned'] = df_all['expected_angle_binned']
     
-    # Group by expected_angle and calculate mean for numeric columns
-    grouped = df_all.groupby(['expected_angle', 'relative_angle'], as_index=False).agg({
+    # Group by binned angles and calculate mean for numeric columns
+    grouped = df_all.groupby(['angle_bin', 'expected_angle_binned', 'relative_angle_binned'], as_index=False).agg({
         'rms_level': 'mean',
         'rms_dbfs': 'mean',
         'peak_level': 'mean',
@@ -449,12 +458,18 @@ def test_polar_pattern(
         'reference_angle': 'first',
         'pass_number': 'count'
     })
+
+    grouped.rename(columns={
+        'expected_angle_binned': 'expected_angle',
+        'relative_angle_binned': 'relative_angle',
+    }, inplace=True)
     
     # Rename count column
     grouped.rename(columns={'pass_number': 'num_passes'}, inplace=True)
     
-    # Sort by expected_angle
-    grouped.sort_values('expected_angle', inplace=True)
+    # Sort by bin index to preserve monotonic angle order
+    grouped.sort_values('angle_bin', inplace=True)
+    grouped.drop(columns=['angle_bin'], inplace=True)
     
     # Save averaged results
     averaged_csv_file = output_path / f"polar_pattern_averaged_{test_timestamp}.csv"
