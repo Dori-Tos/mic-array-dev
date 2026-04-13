@@ -2,15 +2,17 @@
 Polar Pattern Test Protocol
 ===========================
 
-Measures the polar pattern (directivity) of a microphone using the full audio processing pipeline.
+Measures the polar pattern (directivity) of a microphone array using the full audio processing pipeline.
 Performs multi-pass measurements at different angles, applies the complete beamforming and filtering chain,
 and saves results in standardized CSV format for analysis and comparison.
 
 Combines:
-- Pipeline: Same processing chain as test_pipeline.py (beamformer, filters, AGC)
-- Methodology: Dynamic microphone measurement approach (rotating microphone, recording at each angle)
+- Beamformer: MVDR with adaptive smoothing and coherence-based sidelobe suppression
+- Pipeline: Same processing chain as test_pipeline.py (Beamformer + Filters + AGC)
+- Methodology: Dynamic microphone measurement approach (rotating array, recording at each angle)
 - Approach: Multi-pass measurements with averaging (like test_directivity_multipass.py)
 - Output: Standardized CSV format with RMS, peak levels, angles, timestamps
+- Audio: 4-channel array input for beamforming at each measurement point
 """
 
 from datetime import datetime
@@ -49,25 +51,28 @@ def test_polar_pattern(
     quarter_rotation=False
 ):
     """
-    Measure microphone polar pattern using the complete processing pipeline.
+    Measure microphone array polar pattern using the complete processing pipeline.
     
-    Performs multi-pass directivity measurements with full audio processing:
-    - Beamforming (optional MVDR for array measurements)
-    - Filtering (BandPass + Spectral Subtraction)
-    - AGC chain (Adaptive + Pedalboard)
+    Performs multi-pass directivity measurements with full audio processing at each angle:
+    - Beamforming: MVDR with adaptive smoothing and coherence-based sidelobe suppression
+    - Filtering: BandPass (300-4000 Hz) + Spectral Subtraction
+    - AGC chain: Adaptive Amplifier + Pedalboard AGC
+    
+    Records 4-channel audio from microphone array at each measurement point and applies
+    the complete processing pipeline matching test_pipeline.py configuration.
     
     Args:
         num_passes: Number of complete rotations to perform (default: 3)
         resolution: Number of measurement points around 360° per pass (default: 50)
         seconds_per_rotation: Time for one complete turntable rotation in seconds (default: 120)
-        device_index: Audio device index (None = use default input device)
+        device_index: Audio device index for 4-channel array (None = use default input)
         sample_duration: Duration to record audio at each point in seconds (default: 0.8)
         rotation_direction: Direction of turntable rotation ('clockwise' or 'counterclockwise')
         output_dir: Directory to save measurement data
-        reference_angle: Angle where microphone is pointing initially (default: 0°)
-        use_pipeline: Whether to apply full processing pipeline (default: True)
+        reference_angle: Angle where array is pointing initially (default: 0°)
+        use_pipeline: Whether to apply full processing pipeline with beamformer (default: True)
         wait_between_passes: If True, wait for Enter key before starting next pass
-        quarter_rotation: If True, measure only front 90° instead of full 360° (default: False)
+        quarter_rotation: If True, measure only front 90° instead of full 360° (faster)
                          Useful for measuring front directivity and mirroring afterwards
     
     Returns:
@@ -94,11 +99,15 @@ def test_polar_pattern(
     
     sample_rate = int(device_info['default_samplerate'])
     
+    # For array-based measurements, assume 4-channel input
+    num_channels = 4
+    
     print(f"\n{'='*70}")
     print(f"Polar Pattern Test Protocol Configuration:")
     print(f"{'='*70}")
     print(f"  Audio device: {device_name} (index {device_index})")
     print(f"  Sample rate: {sample_rate} Hz")
+    print(f"  Channels: {num_channels} (array-based beamforming)")
     print(f"  Number of passes: {num_passes}")
     print(f"  Measurement range: {total_degrees}° {f'(FRONT ONLY - will be mirrored)' if quarter_rotation else '(FULL CIRCLE)'}")
     print(f"  Resolution: {resolution} points ({degrees_per_measurement:.1f}° per measurement)")
@@ -110,7 +119,7 @@ def test_polar_pattern(
     print(f"  Total test duration: ~{num_passes * resolution * interval / 60:.1f} minutes")
     print(f"  Output directory: {output_path}")
     if use_pipeline:
-        print(f"  Processing: Full pipeline (BandPass + SpectralSubtraction + AGC)")
+        print(f"  Processing: Full pipeline (MVDR Beamformer + BandPass + SpectralSubtraction + AGC)")
     else:
         print(f"  Processing: Raw audio only")
     print(f"{'='*70}\n")
@@ -129,7 +138,33 @@ def test_polar_pattern(
     if use_pipeline:
         print("Initializing audio processing pipeline...")
         
-        # Filters
+        # Microphone array geometry (square configuration)
+        mic_channel_numbers = [0, 1, 2, 3]
+        mic_positions = np.array([
+            [0.0, 0.0, 0.0],
+            [0.055, 0.0, 0.0],
+            [0.055, 0.055, 0.0],
+            [0.0, 0.055, 0.0],
+        ])
+        
+        # MVDR Beamformer (same config as test_pipeline.py)
+        beamformer = MVDRBeamformer(
+            logger=logger,
+            mic_channel_numbers=mic_channel_numbers,
+            sample_rate=sample_rate,
+            mic_positions_m=mic_positions,
+            covariance_alpha=0.95,
+            diagonal_loading=0.15,
+            spectral_whitening_factor=0.12,
+            weight_smooth_alpha=0.72,
+            max_adaptive_loading_scale=4.0,
+            coherence_suppression_strength=0.8,
+            weight_smooth_alpha_min=0.45,
+            weight_smooth_alpha_max=0.82,
+            snr_threshold_for_sharpening=2.0,
+        )
+        
+        # Filters (same config as test_pipeline.py)
         filters = [
             BandPassFilter(
                 logger=logger,
@@ -142,42 +177,43 @@ def test_polar_pattern(
                 logger=logger,
                 sample_rate=sample_rate,
                 noise_factor=0.65,
-                gain_floor=0.35,
+                gain_floor=0.55,  # Updated from 0.35 (prevents over-suppression of low freqs)
                 noise_alpha=0.995,
                 noise_update_snr_db=8.0,
                 gain_smooth_alpha=0.92,
             ),
         ]
         
-        # AGC chain
+        # AGC chain (same config as test_pipeline.py)
         agc = AGCChain(logger=logger, stages=[
             AdaptiveAmplifier(
                 logger=logger,
                 target_rms=0.08,
                 min_gain=1.0,
-                max_gain=12.0,
+                max_gain=6.0,  # Updated from 12.0 (prevent oscillation)
                 adapt_alpha=0.04,
                 speech_activity_rms=0.00012,
                 silence_decay_alpha=0.008,
                 activity_hold_ms=600.0,
-                peak_protect_threshold=0.35,
-                peak_protect_strength=0.85,
+                peak_protect_threshold=0.30,  # Updated from 0.35
+                peak_protect_strength=1.0,  # Updated from 0.85 (maximum protection)
                 max_gain_warn_rms_min=0.001,
             ),
             PedalboardAGC(
                 logger=logger,
                 sample_rate=sample_rate,
                 threshold_db=-20.0,
-                ratio=3.5,
+                ratio=2.0,  # Updated from 3.5 (gentler compression)
                 attack_ms=3.0,
                 release_ms=140.0,
-                limiter_threshold_db=-1.4,
-                limiter_release_ms=100.0
+                limiter_threshold_db=-7.0,  # Updated from -1.4 (much lower headroom)
+                limiter_release_ms=50.0  # Updated from 100.0
             ),
         ])
         
-        print("Pipeline initialized.\n")
+        print("Pipeline initialized (Beamformer + Filters + AGC).\n")
     else:
+        beamformer = None
         filters = []
         agc = None
     
@@ -222,12 +258,12 @@ def test_polar_pattern(
                 if time_to_wait > 0:
                     time.sleep(time_to_wait)
                 
-                # Record audio sample
+                # Record audio sample (4-channel for beamforming)
                 try:
                     audio_data = sd.rec(
                         int(sample_duration * sample_rate),
                         samplerate=sample_rate,
-                        channels=1,
+                        channels=num_channels,
                         device=device_index,
                         blocking=True
                     )
@@ -236,12 +272,20 @@ def test_polar_pattern(
                     continue
                 
                 # Ensure audio is float32 and normalized to [-1, 1]
-                audio_data = np.squeeze(audio_data).astype(np.float32)
-                if audio_data.max() > 1.0 or audio_data.min() < -1.0:
-                    audio_data = audio_data / max(abs(audio_data.max()), abs(audio_data.min()))
+                audio_data = np.asarray(audio_data).astype(np.float32)
+                max_val = np.max(np.abs(audio_data))
+                if max_val > 1.0:
+                    audio_data = audio_data / max_val
                 
                 # Apply processing pipeline if enabled
                 processed_audio = audio_data.copy()
+                
+                if use_pipeline and beamformer:
+                    # Apply beamforming first (converts 4-channel to mono)
+                    processed_audio = beamformer.apply(processed_audio, theta_deg=0.0)
+                    # Reshape to 1D for filter processing
+                    if processed_audio.ndim > 1:
+                        processed_audio = np.squeeze(processed_audio)
                 
                 if use_pipeline and filters:
                     # Apply filters
