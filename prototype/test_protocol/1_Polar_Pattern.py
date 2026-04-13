@@ -52,6 +52,7 @@ def test_polar_pattern(
     quarter_rotation=False,
     freeze_beamformer=True,
     freeze_angle_deg=0.0,
+    save_on_interrupt=False,
 ):
     """
     Measure microphone array polar pattern using the complete processing pipeline.
@@ -79,6 +80,8 @@ def test_polar_pattern(
                          Useful for measuring front directivity and mirroring afterwards
         freeze_beamformer: If True, keep steering fixed to freeze_angle_deg for all measurements
         freeze_angle_deg: Steering angle used when freeze_beamformer is enabled
+        save_on_interrupt: If True, save partial data when interrupted by Ctrl+C.
+                  Default False to avoid saving incomplete measurements.
     
     Returns:
         DataFrame with averaged measurements
@@ -131,6 +134,7 @@ def test_polar_pattern(
             print(f"  Beamformer freeze angle: {float(freeze_angle_deg):.1f}°")
     else:
         print(f"  Processing: Raw audio only")
+    print(f"  Save on interrupt: {'ON' if save_on_interrupt else 'OFF (default)'}")
 
     if sample_duration > interval:
         print(
@@ -245,6 +249,7 @@ def test_polar_pattern(
     # This also gives a deterministic moment for the operator to start rotation.
     warmup_seconds = 2.0
     print(f"Warm-up: running {warmup_seconds:.1f}s pre-capture through processing chain...")
+    interrupted = False
     try:
         warmup_audio = sd.rec(
             int(warmup_seconds * sample_rate),
@@ -402,9 +407,14 @@ def test_polar_pattern(
         
     except KeyboardInterrupt:
         print("\n\nMeasurement interrupted by user")
+        interrupted = True
         if len(all_measurements) == 0:
             print("No data to save.")
             return None
+
+    if interrupted and not save_on_interrupt:
+        print("Interrupted run detected. Partial data discarded (save_on_interrupt is OFF).")
+        return None
     
     # Convert all measurements to DataFrame
     df_all = pd.DataFrame(all_measurements)
@@ -504,13 +514,12 @@ if __name__ == '__main__':
                         help='Wait for Enter key before starting each new pass')
     parser.add_argument('--quarter-rotation', action='store_true',
                         help='Measure only front 90° instead of full 360° (useful for measuring front directivity and mirroring afterwards)')
-    parser.add_argument('--freeze-beamformer', dest='freeze_beamformer', action='store_true',
-                        help='Freeze beamformer steering during the full measurement run')
-    parser.add_argument('--no-freeze-beamformer', dest='freeze_beamformer', action='store_false',
-                        help='Disable beamformer freeze and use theta passed to processing chain')
+    parser.add_argument('--freeze-beamformer', action=argparse.BooleanOptionalAction, default=True,
+                        help='Freeze beamformer steering during the full measurement run (default: enabled)')
     parser.add_argument('--freeze-angle', type=float, default=0.0,
                         help='Steering angle used when beamformer freeze is enabled (default: 0.0)')
-    parser.set_defaults(freeze_beamformer=True)
+    parser.add_argument('--save-on-interrupt', action=argparse.BooleanOptionalAction, default=False,
+                        help='Save partial data when interrupted by Ctrl+C (default: disabled)')
     
     args = parser.parse_args()
     
@@ -546,6 +555,7 @@ if __name__ == '__main__':
         quarter_rotation=args.quarter_rotation,
         freeze_beamformer=args.freeze_beamformer,
         freeze_angle_deg=args.freeze_angle,
+        save_on_interrupt=args.save_on_interrupt,
     )
     
     # Usage examples:
