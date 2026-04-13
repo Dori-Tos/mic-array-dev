@@ -11,6 +11,45 @@ from scipy import signal
 from collections import deque
 from math import gcd
 
+
+def apply_realtime_processing_chain(
+    block: np.ndarray,
+    beamformer,
+    filters,
+    agc,
+    sample_rate: int,
+    monitor_gain: float = 1.0,
+    theta_deg: float | None = None,
+) -> np.ndarray:
+    """
+    Apply the same beamformer/filter/AGC chain used by Array_RealTime.
+
+    This helper allows offline protocols to reuse the exact processing order
+    without duplicating implementation details.
+    """
+    processed = np.asarray(block, dtype=np.float32)
+
+    if beamformer is not None:
+        if theta_deg is None:
+            processed = beamformer.apply(processed)
+        else:
+            processed = beamformer.apply(processed, theta_deg=theta_deg)
+
+    if processed.ndim > 1:
+        processed = np.squeeze(processed)
+    processed = np.asarray(processed, dtype=np.float32).reshape(-1)
+
+    for filt in filters or []:
+        processed = np.asarray(filt.apply(processed), dtype=np.float32).reshape(-1)
+
+    if agc is not None:
+        processed = np.asarray(agc.process(processed, sample_rate=sample_rate), dtype=np.float32).reshape(-1)
+
+    if monitor_gain != 1.0:
+        processed = processed * float(monitor_gain)
+
+    return processed
+
 class Array_RealTime(Array):    
     """
     Real-time audio processing array class that extends the base Array with real-time capabilities.

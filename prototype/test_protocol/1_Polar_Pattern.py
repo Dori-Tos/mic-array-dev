@@ -33,6 +33,7 @@ from classes.Microphone import Microphone
 from classes.DOAEstimator import IterativeDOAEstimator
 from classes.Beamformer import DASBeamformer, MVDRBeamformer
 from classes.EchoCanceller import EchoCanceller
+from classes.Array_RealTime import apply_realtime_processing_chain
 from classes.Filter import BandPassFilter, SpectralSubtractionFilter
 from classes.AGC import AdaptiveAmplifier, PedalboardAGC, AGCChain
 
@@ -99,8 +100,8 @@ def test_polar_pattern(
     
     sample_rate = int(device_info['default_samplerate'])
     
-    # For array-based measurements, assume 4-channel input
-    num_channels = 4
+    # Use 4 channels for array processing; keep single-channel raw mode.
+    num_channels = 4 if use_pipeline else 1
     
     print(f"\n{'='*70}")
     print(f"Polar Pattern Test Protocol Configuration:")
@@ -138,14 +139,10 @@ def test_polar_pattern(
     if use_pipeline:
         print("Initializing audio processing pipeline...")
         
-        # Microphone array geometry (square configuration)
+        # Microphone array geometry (same source as realtime pipeline)
         mic_channel_numbers = [0, 1, 2, 3]
-        mic_positions = np.array([
-            [0.0, 0.0, 0.0],
-            [0.055, 0.0, 0.0],
-            [0.055, 0.055, 0.0],
-            [0.0, 0.055, 0.0],
-        ])
+        geometry_path = Path(__file__).resolve().parent.parent / "array_geometries" / "1_square.xml"
+        mic_positions = MVDRBeamformer.load_positions_from_xml(str(geometry_path))
         
         # MVDR Beamformer (same config as test_pipeline.py)
         beamformer = MVDRBeamformer(
@@ -277,24 +274,19 @@ def test_polar_pattern(
                 if max_val > 1.0:
                     audio_data = audio_data / max_val
                 
-                # Apply processing pipeline if enabled
-                processed_audio = audio_data.copy()
-                
-                if use_pipeline and beamformer:
-                    # Apply beamforming first (converts 4-channel to mono)
-                    processed_audio = beamformer.apply(processed_audio, theta_deg=0.0)
-                    # Reshape to 1D for filter processing
-                    if processed_audio.ndim > 1:
-                        processed_audio = np.squeeze(processed_audio)
-                
-                if use_pipeline and filters:
-                    # Apply filters
-                    for filt in filters:
-                        processed_audio = filt.apply(processed_audio)
-                
-                if use_pipeline and agc:
-                    # Apply AGC
-                    processed_audio = agc.process(processed_audio)
+                # Apply processing pipeline using the shared Array_RealTime chain helper
+                if use_pipeline:
+                    processed_audio = apply_realtime_processing_chain(
+                        block=audio_data,
+                        beamformer=beamformer,
+                        filters=filters,
+                        agc=agc,
+                        sample_rate=sample_rate,
+                        monitor_gain=1.0,
+                        theta_deg=0.0,
+                    )
+                else:
+                    processed_audio = np.asarray(audio_data[:, 0], dtype=np.float32)
                 
                 # Calculate RMS and peak levels
                 rms_level = np.sqrt(np.mean(processed_audio ** 2))
@@ -427,7 +419,6 @@ if __name__ == '__main__':
     
     args = parser.parse_args()
     
-    # List devices if requested
     if args.list_devices:
         print("\nAvailable Audio Input Devices:")
         print("=" * 70)
@@ -463,22 +454,22 @@ if __name__ == '__main__':
     # Usage examples:
     # 
     # List available audio devices:
-    # python 1_Polar_Pattern.py --list-devices
+    # python prototype/test_protocol/1_Polar_Pattern.py --list-devices
     #
     # Standard measurement with full pipeline (3 passes, 50 points, 120 sec/rotation):
-    # python 1_Polar_Pattern.py --device 1 --passes 3 --resolution 50 --rotation-time 120 --duration 0.8
+    # python prototype/test_protocol/1_Polar_Pattern.py --device 1 --passes 3 --resolution 50 --rotation-time 120 --duration 0.8
     #
     # Quick test (1 pass, 36 points, 60 sec/rotation):
-    # python 1_Polar_Pattern.py --device 1 --passes 1 --resolution 36 --rotation-time 60 --duration 0.8
+    # python prototype/test_protocol/1_Polar_Pattern.py --device 1 --passes 1 --resolution 36 --rotation-time 60 --duration 0.8
     #
     # Front directivity only (90°, mirrored afterwards) - 3 passes, 50 points:
-    # python 1_Polar_Pattern.py --device 1 --passes 3 --resolution 50 --rotation-time 120 --duration 0.8 --quarter-rotation
+    # python prototype/test_protocol/1_Polar_Pattern.py --device 1 --passes 3 --resolution 50 --rotation-time 120 --duration 0.8 --quarter-rotation
     #
     # Raw audio only (no processing pipeline):
-    # python 1_Polar_Pattern.py --device 1 --no-pipeline --passes 3 --resolution 50 --rotation-time 120
+    # python prototype/test_protocol/1_Polar_Pattern.py --device 1 --no-pipeline --passes 3 --resolution 50 --rotation-time 120
     #
     # With manual synchronization between passes:
-    # python 1_Polar_Pattern.py --device 1 --passes 3 --resolution 50 --rotation-time 120 --wait-between-passes
+    # python prototype/test_protocol/1_Polar_Pattern.py --device 1 --passes 3 --resolution 50 --rotation-time 120 --wait-between-passes
     #
     # With manual synchronization and front directivity only:
-    # python 1_Polar_Pattern.py --device 1 --passes 3 --resolution 50 --rotation-time 90 --wait-between-passes --quarter-rotation
+    # python prototype/test_protocol/1_Polar_Pattern.py --device 1 --passes 3 --resolution 50 --rotation-time 90 --wait-between-passes --quarter-rotation
