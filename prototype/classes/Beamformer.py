@@ -215,7 +215,11 @@ class MVDRBeamformer(Beamformer):
     :param diagonal_loading: Amount of diagonal loading to improve numerical stability (default: 1e-3).
     :param spectral_whitening_factor: Adaptive whitening strength (0–1, higher = more aggressive whitening to suppress noise).
     :param weight_smooth_alpha: Temporal smoothing for MVDR weights (0 = no smoothing, close to 1 = smoother/more stable).
+        This is now a baseline; actual alpha adapts based on SNR for best directivity.
     :param max_adaptive_loading_scale: Upper bound for adaptive loading scale to avoid over-whitening.
+    :param coherence_suppression_strength: Strength of diffuse noise suppression via coherence weighting (0–1).
+        0.0 = no suppression (pure MVDR), 1.0 = maximum suppression (aggressive noise reduction).
+        Default 0.5 balances directivity with speech preservation.
     """
     def __init__(
         self, logger: logging.Logger,
@@ -226,6 +230,10 @@ class MVDRBeamformer(Beamformer):
         spectral_whitening_factor: float = 0.3,
         weight_smooth_alpha: float = 0.82,
         max_adaptive_loading_scale: float = 8.0,
+        coherence_suppression_strength: float = 0.5,
+        weight_smooth_alpha_min: float = 0.45,
+        weight_smooth_alpha_max: float = 0.82,
+        snr_threshold_for_sharpening: float = 2.0,
     ):
         super().__init__(
             logger=logger,
@@ -245,12 +253,24 @@ class MVDRBeamformer(Beamformer):
             raise ValueError("weight_smooth_alpha must be in [0, 1)")
         if max_adaptive_loading_scale <= 0.0:
             raise ValueError("max_adaptive_loading_scale must be > 0")
+        if not 0.0 <= coherence_suppression_strength <= 1.0:
+            raise ValueError("coherence_suppression_strength must be in [0, 1]")
+        if not 0.0 <= weight_smooth_alpha_min < 1.0:
+            raise ValueError("weight_smooth_alpha_min must be in [0, 1)")
+        if not weight_smooth_alpha_min <= weight_smooth_alpha_max < 1.0:
+            raise ValueError("weight_smooth_alpha_min must be <= weight_smooth_alpha_max < 1.0")
+        if snr_threshold_for_sharpening <= 0:
+            raise ValueError("snr_threshold_for_sharpening must be > 0")
 
         self.covariance_alpha = float(covariance_alpha)
         self.diagonal_loading = float(diagonal_loading)
         self.spectral_whitening_factor = float(spectral_whitening_factor)
-        self.weight_smooth_alpha = float(weight_smooth_alpha)
+        self.weight_smooth_alpha_fixed = float(weight_smooth_alpha)  # Keep original for reference
+        self.weight_smooth_alpha_min = float(weight_smooth_alpha_min)  # Sharp main lobe (steady state)
+        self.weight_smooth_alpha_max = float(weight_smooth_alpha_max)  # Stable (noisy conditions)
+        self.snr_threshold_for_sharpening = float(snr_threshold_for_sharpening)  # Transition point
         self.max_adaptive_loading_scale = float(max_adaptive_loading_scale)
+        self.coherence_suppression_strength = float(coherence_suppression_strength)
         self._covariance: np.ndarray | None = None
         self._prev_weights: np.ndarray | None = None
         self._power_iteration_vec: np.ndarray | None = None
@@ -316,6 +336,88 @@ class MVDRBeamformer(Beamformer):
         
         snr_ratio = dominant_eigenvalue / (avg_eigenvalue + self._eps)
         return np.clip(snr_ratio, 0.1, 10.0)
+    
+    def _compute_adaptive_weight_smooth_alpha(self, snr_ratio: float) -> float:
+        """
+        Compute adaptive weight smoothing factor based on SNR.
+        
+        Mechanism: During steady-state high-SNR conditions (clean speech), use lower smoothing
+        (weight_smooth_alpha_min) for sharp main lobe directivity. During noisy low-SNR conditions,
+        fall back to higher smoothing (weight_smooth_alpha_max) for stability.
+        
+        :param snr_ratio: SNR estimate from _compute_block_snr_estimate()
+        :return: Adaptive alpha in range [weight_smooth_alpha_min, weight_smooth_alpha_max]
+        """
+        # Smooth interpolation between min (sharp) and max (stable) based on SNR relative to threshold
+        # SNR 1.0 (low)  -> alpha_max (0.82, very smooth/stable)
+        # SNR 2.0 (threshold) -> alpha_mid (0.63, balanced)
+        # SNR 5.0+ (high) -> alpha_min (0.45, sharp directivity)
+        
+        # Clamp SNR to valid range for smooth interpolation
+        snr_clipped = np.clip(snr_ratio, 0.5, 5.0)
+        
+        # Normalized position between threshold and high-SNR region: 0 (low) to 1 (high)
+        # At snr_threshold (2.0): t = 0.0 -> use alpha_max
+        # At snr_threshold * 2.5 (5.0): t = 1.0 -> use alpha_min
+        t = np.clip(
+            (snr_clipped - self.snr_threshold_for_sharpening) / 
+            (2.5 * self.snr_threshold_for_sharpening - self.snr_threshold_for_sharpening),
+            0.0, 1.0
+        )
+        
+        # Interpolate: high t -> low alpha (sharp), low t -> high alpha (stable)
+        # Use quadratic ease-out for smoother transition
+        adaptive_alpha = self.weight_smooth_alpha_max - (self.weight_smooth_alpha_max - self.weight_smooth_alpha_min) * (t ** 1.5)
+        
+        return float(adaptive_alpha)
+    
+    def _compute_coherence_strength(self, spectrum: np.ndarray) -> np.ndarray:
+        """
+        Compute inter-channel coherence as a measure of source coherence vs. diffuse noise.
+        
+        Coherence ρ between channels i,j at frequency f:
+            ρ = |E[X_i * conj(X_j)]| / sqrt(E[|X_i|²] * E[|X_j|²])
+        
+        Returns: Average coherence per frequency bin, shape (freq_bins,) in range [0, 1]
+            - 1.0 = perfectly coherent (point source)
+            - 0.5 = moderately coherent
+            - 0.0 = incoherent (diffuse noise)
+        
+        Used to suppress diffuse noise and room reflections while preserving main source.
+        """
+        freq_bins, num_mics = spectrum.shape
+        
+        # Compute magnitude spectrum for each channel
+        mag_spectrum = np.abs(spectrum)  # Shape: (freq_bins, num_mics)
+        
+        # Compute pairwise coherence (vectorized)
+        # Numerator: |cross-spectrum| averaged over all channel pairs
+        # Denominator: geometric mean of power spectra
+        coherence_sum = np.zeros(freq_bins, dtype=np.float64)
+        pair_count = 0
+        
+        for i in range(num_mics):
+            for j in range(i + 1, num_mics):
+                # Cross-spectrum magnitude
+                cross_spec = np.abs(
+                    spectrum[:, i] * np.conj(spectrum[:, j])
+                )
+                
+                # Power spectra (geometric mean)
+                power_geom = np.sqrt(
+                    (mag_spectrum[:, i] ** 2) * (mag_spectrum[:, j] ** 2) + self._eps
+                )
+                
+                # Coherence for this pair
+                coherence_pair = cross_spec / (power_geom + self._eps)
+                coherence_sum += coherence_pair
+                pair_count += 1
+        
+        # Average over all pairs
+        avg_coherence = coherence_sum / max(pair_count, 1)
+        
+        # Clip to [0, 1] range
+        return np.clip(avg_coherence, 0.0, 1.0)
 
     def process(self, block: np.ndarray, theta_deg: float) -> np.ndarray:
         selected = self._select_channels(np.asarray(block, dtype=np.float64))
@@ -363,8 +465,10 @@ class MVDRBeamformer(Beamformer):
         weights[~valid] = 1.0 / self.channel_count
 
         # Temporal smoothing suppresses rapid weight swings that cause popping with side/rear interferers.
+        # Use adaptive smoothing factor to sharpen main lobe during steady-state high-SNR conditions.
         if self._prev_weights is not None and self._prev_weights.shape == weights.shape:
-            weights = self.weight_smooth_alpha * self._prev_weights + (1.0 - self.weight_smooth_alpha) * weights
+            adaptive_alpha = self._compute_adaptive_weight_smooth_alpha(block_snr_ratio)
+            weights = adaptive_alpha * self._prev_weights + (1.0 - adaptive_alpha) * weights
 
         # Re-enforce distortionless response after smoothing.
         smooth_denom = np.einsum("fi,fi->f", np.conj(steering), weights, optimize=True)
@@ -373,7 +477,28 @@ class MVDRBeamformer(Beamformer):
         weights[~valid_smooth] = 1.0 / self.channel_count
         self._prev_weights = weights.copy()
 
+        # COHERENCE-BASED SIDELOBE SUPPRESSION: Suppress diffuse noise while preserving main source
+        # Compute inter-channel coherence (0=diffuse, 1=coherent point-source)
+        coherence = self._compute_coherence_strength(spectrum)  # Shape: (freq_bins,)
+        
+        # Apply user-controlled suppression strength to coherence gain
+        # suppression_strength = 0.0: No suppression, pure MVDR
+        # suppression_strength = 0.5 (default): Balanced suppression
+        # suppression_strength = 1.0: Aggressive suppression
+        # 
+        # Coherence gain mapping with tunable strength:
+        # - High coherence (0.95) -> gain ~0.975 (almost full MVDR)
+        # - Medium coherence (0.5) -> gain ~0.75 (moderate suppression)
+        # - Low coherence (0.1) -> gain ~0.55 at strength=0.5, or 0.1 at strength=1.0
+        base_gain = 0.5 + 0.5 * coherence  # Base mapping: [0, 1] -> [0.5, 1.0]
+        coherence_gain = base_gain ** (1.0 - 0.8 * self.coherence_suppression_strength)
+        # ^ At strength=0.5: ^0.6 exponent, adds mid-range suppression
+        # ^ At strength=1.0: ^0.2 exponent, very aggressive suppression
+        
+        # Apply coherence-based modulation to the output spectrum
+        # This reduces energy from frequency bins with low inter-channel coherence (diffuse noise)
         output_spectrum = np.einsum("fi,fi->f", np.conj(weights), spectrum, optimize=True)
+        output_spectrum *= coherence_gain  # Suppress low-coherence frequencies
 
         return np.fft.irfft(output_spectrum, n=n_samples).astype(np.float64, copy=False)
 

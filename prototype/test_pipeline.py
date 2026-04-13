@@ -55,8 +55,13 @@ if __name__ == "__main__":
         diagonal_loading=0.15,             # Higher regularization suppresses off-axis interference
                                            # Trade-off: reduces directional response slightly but cuts side voices
         spectral_whitening_factor=0.12,    # Keeps main lobe energy while suppressing diffuse noise
-        weight_smooth_alpha=0.72,          # Smoother weights = cleaner main voice, less side distortion
+        weight_smooth_alpha=0.72,          # Baseline smoothing (will adapt based on SNR)
         max_adaptive_loading_scale=4.0,    # Prevents extreme gain at low-SNR frequencies
+        coherence_suppression_strength=0.8,  # Suppress diffuse noise via coherence-based weighting (0-1)
+                                            # 0.0 = pure MVDR, 0.6 = balanced, 1.0 = aggressive room noise rejection
+        weight_smooth_alpha_min=0.45,      # NEW: Sharp main lobe during steady-state (high-SNR speech)
+        weight_smooth_alpha_max=0.82,      # NEW: Stable weights in noisy conditions (low-SNR)
+        snr_threshold_for_sharpening=2.0,  # NEW: SNR above this triggers sharpening (lower smoothing)
     )
 
 
