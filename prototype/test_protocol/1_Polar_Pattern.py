@@ -233,6 +233,40 @@ def test_polar_pattern(
     
     # Get timestamp for this test run
     test_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+    # Warm up filters/AGC before timed measurements to avoid low initial gain frames.
+    # This also gives a deterministic moment for the operator to start rotation.
+    warmup_seconds = 2.0
+    print(f"Warm-up: running {warmup_seconds:.1f}s pre-capture through processing chain...")
+    try:
+        warmup_audio = sd.rec(
+            int(warmup_seconds * sample_rate),
+            samplerate=sample_rate,
+            channels=num_channels,
+            device=device_index,
+            blocking=True,
+        )
+        warmup_audio = np.asarray(warmup_audio).astype(np.float32)
+        warmup_peak = np.max(np.abs(warmup_audio)) if warmup_audio.size > 0 else 0.0
+        if warmup_peak > 1.0:
+            warmup_audio = warmup_audio / warmup_peak
+
+        if use_pipeline:
+            _ = apply_realtime_processing_chain(
+                block=warmup_audio,
+                beamformer=beamformer,
+                filters=filters,
+                agc=agc,
+                sample_rate=sample_rate,
+                monitor_gain=1.0,
+                theta_deg=0.0,
+                freeze_beamformer=bool(freeze_beamformer),
+                freeze_angle_deg=float(freeze_angle_deg) if freeze_angle_deg is not None else None,
+            )
+    except Exception as warmup_err:
+        print(f"Warm-up warning: {type(warmup_err).__name__}: {warmup_err}")
+
+    input("Warm-up complete. Press Enter to begin measurement and start rotation...")
     
     print(f"Starting {num_passes}-pass polar pattern measurements...")
     print("Press Ctrl+C to stop early\n")
