@@ -88,7 +88,7 @@ if __name__ == "__main__":
             logger=logger,
             sample_rate=sample_rate,
             noise_factor=0.65,              # Moderate noise suppression 
-            gain_floor=0.35,                # Prevents aggressive suppression causing robotification
+            gain_floor=0.55,                # Higher floor prevents over-suppression of low freqs (was 0.35)
             noise_alpha=0.995,              # Very slow noise learning prevents formant suppression
             noise_update_snr_db=8.0,        # Can now update during low-SNR moments (protected from onset corruption)
             gain_smooth_alpha=0.92,         # Very strong uniform gain smoothing locks formants, eliminates pops
@@ -100,25 +100,25 @@ if __name__ == "__main__":
             logger=logger,
             target_rms=0.08,          # Boost normal speech toward target operating level
             min_gain=1.0,             # Do NOT attenuate normal program material
-            max_gain=12.0,            # Allow enough lift for quieter speech
+            max_gain=6.0,             # Aggressive limit to prevent oscillation (was 12.0)
             adapt_alpha=0.04,         # Balanced adaptation speed
             speech_activity_rms=0.00012,  # Treat lower-level speech as active (restore quiet voice audibility)
             silence_decay_alpha=0.008,    # Slower decay to avoid dropping between words/syllables
             activity_hold_ms=600.0,       # Hold gain after speech to preserve phrase continuity
-            peak_protect_threshold=0.35, # Start gain damping when peaks indicate loud transients
-            peak_protect_strength=0.85,  # Strong damping to reduce limiter stress on loud voice
-            max_gain_warn_rms_min=0.001, # Suppress max-gain warnings for near-silence frames
+            peak_protect_threshold=0.30,  # More generous headroom to prevent oscillation (was 0.25)
+            peak_protect_strength=1.0,    # Maximum protection (was 0.85)
+            max_gain_warn_rms_min=0.001,  # Suppress max-gain warnings for near-silence frames
         ),
         
         PedalboardAGC(
             logger=logger,
             sample_rate=sample_rate,
             threshold_db=-20.0,       # Compress only above normal speech operating zone
-            ratio=3.5,                # Moderate peak control without flattening normal signal
+            ratio=2.0,                # Gentler compression (was 3.5) to prevent hunting
             attack_ms=3.0,            # Faster reaction for loud transients
             release_ms=140.0,         # Smooth recovery to avoid pumping
-            limiter_threshold_db=-1.4, # Protect output from hard clipping on very loud bursts
-            limiter_release_ms=100.0  # Smoother limiter recovery
+            limiter_threshold_db=-7.0,    # Much lower to catch peaks before clipping (was -3.0)
+            limiter_release_ms=50.0       # Faster limiter response (was 100.0)
         ),
     ])
         
