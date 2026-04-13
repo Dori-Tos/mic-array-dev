@@ -2,12 +2,14 @@
   <!--
     Square-on-corner (diamond) layout in x-z plane.
     Convention:
+    - Placed according to array center
+    - Axes & angles are taken from the array's perspective
     - +x is right, -x is left
     - +y is front
     - 0° points to +y (front center)
     - +angle points to the right side (+x)
 
-    Channel mapping requested:
+    Channel mapping:
     - Pair 1-2: ch1 right, ch2 left (upper left side)
     - Pair 3-4: ch3 right, ch4 left (lower right side)
   -->
