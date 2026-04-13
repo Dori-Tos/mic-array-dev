@@ -49,7 +49,9 @@ def test_polar_pattern(
     reference_angle=0,
     use_pipeline=True,
     wait_between_passes=False,
-    quarter_rotation=False
+    quarter_rotation=False,
+    freeze_beamformer=True,
+    freeze_angle_deg=0.0,
 ):
     """
     Measure microphone array polar pattern using the complete processing pipeline.
@@ -75,6 +77,8 @@ def test_polar_pattern(
         wait_between_passes: If True, wait for Enter key before starting next pass
         quarter_rotation: If True, measure only front 90° instead of full 360° (faster)
                          Useful for measuring front directivity and mirroring afterwards
+        freeze_beamformer: If True, keep steering fixed to freeze_angle_deg for all measurements
+        freeze_angle_deg: Steering angle used when freeze_beamformer is enabled
     
     Returns:
         DataFrame with averaged measurements
@@ -121,6 +125,9 @@ def test_polar_pattern(
     print(f"  Output directory: {output_path}")
     if use_pipeline:
         print(f"  Processing: Full pipeline (MVDR Beamformer + BandPass + SpectralSubtraction + AGC)")
+        print(f"  Beamformer freeze: {'ON' if freeze_beamformer else 'OFF'}")
+        if freeze_beamformer:
+            print(f"  Beamformer freeze angle: {float(freeze_angle_deg):.1f}°")
     else:
         print(f"  Processing: Raw audio only")
     print(f"{'='*70}\n")
@@ -284,6 +291,8 @@ def test_polar_pattern(
                         sample_rate=sample_rate,
                         monitor_gain=1.0,
                         theta_deg=0.0,
+                        freeze_beamformer=bool(freeze_beamformer),
+                        freeze_angle_deg=float(freeze_angle_deg) if freeze_angle_deg is not None else None,
                     )
                 else:
                     processed_audio = np.asarray(audio_data[:, 0], dtype=np.float32)
@@ -415,6 +424,13 @@ if __name__ == '__main__':
                         help='Wait for Enter key before starting each new pass')
     parser.add_argument('--quarter-rotation', action='store_true',
                         help='Measure only front 90° instead of full 360° (useful for measuring front directivity and mirroring afterwards)')
+    parser.add_argument('--freeze-beamformer', dest='freeze_beamformer', action='store_true',
+                        help='Freeze beamformer steering during the full measurement run')
+    parser.add_argument('--no-freeze-beamformer', dest='freeze_beamformer', action='store_false',
+                        help='Disable beamformer freeze and use theta passed to processing chain')
+    parser.add_argument('--freeze-angle', type=float, default=0.0,
+                        help='Steering angle used when beamformer freeze is enabled (default: 0.0)')
+    parser.set_defaults(freeze_beamformer=True)
     
     args = parser.parse_args()
     
@@ -447,7 +463,9 @@ if __name__ == '__main__':
         reference_angle=args.reference_angle,
         use_pipeline=not args.no_pipeline,
         wait_between_passes=args.wait_between_passes,
-        quarter_rotation=args.quarter_rotation
+        quarter_rotation=args.quarter_rotation,
+        freeze_beamformer=args.freeze_beamformer,
+        freeze_angle_deg=args.freeze_angle,
     )
     
     # Usage examples:

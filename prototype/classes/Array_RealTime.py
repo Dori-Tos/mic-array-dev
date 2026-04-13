@@ -20,6 +20,8 @@ def apply_realtime_processing_chain(
     sample_rate: int,
     monitor_gain: float = 1.0,
     theta_deg: float | None = None,
+    freeze_beamformer: bool = False,
+    freeze_angle_deg: float | None = None,
 ) -> np.ndarray:
     """
     Apply the same beamformer/filter/AGC chain used by Array_RealTime.
@@ -30,10 +32,16 @@ def apply_realtime_processing_chain(
     processed = np.asarray(block, dtype=np.float32)
 
     if beamformer is not None:
-        if theta_deg is None:
+        # Optional freeze mode: lock steering to a fixed angle for all processed blocks.
+        if freeze_beamformer:
+            if freeze_angle_deg is not None and hasattr(beamformer, "set_steering_angle"):
+                beamformer.set_steering_angle(float(freeze_angle_deg))
             processed = beamformer.apply(processed)
         else:
-            processed = beamformer.apply(processed, theta_deg=theta_deg)
+            if theta_deg is None:
+                processed = beamformer.apply(processed)
+            else:
+                processed = beamformer.apply(processed, theta_deg=theta_deg)
 
     if processed.ndim > 1:
         processed = np.squeeze(processed)
