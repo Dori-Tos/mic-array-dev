@@ -16,17 +16,25 @@ Combines:
 """
 
 from datetime import datetime
+from contextlib import contextmanager
 from pathlib import Path
 import argparse
+import os
+import select
 import time
 import math
 import logging
 import sys
 
-try:
-    import msvcrt
-except ImportError:
+if os.name == 'nt':
+    try:
+        import msvcrt
+    except ImportError:
+        msvcrt = None
+else:
     msvcrt = None
+    import termios
+    import tty
 
 import numpy as np
 import pandas as pd
@@ -44,15 +52,44 @@ from classes.AGC import AdaptiveAmplifier, PedalboardAGC, AGCChain
 
 
 def _consume_backspace_request() -> bool:
-    """Return True if Backspace was pressed since the last poll (Windows console)."""
-    if msvcrt is None:
+    """Return True if Backspace was pressed since the last poll."""
+    if os.name == 'nt':
+        if msvcrt is None:
+            return False
+        requested = False
+        while msvcrt.kbhit():
+            key = msvcrt.getch()
+            if key in (b'\x08', b'\x7f'):
+                requested = True
+        return requested
+
+    if not sys.stdin.isatty():
         return False
+
     requested = False
-    while msvcrt.kbhit():
-        key = msvcrt.getch()
-        if key in (b'\x08', b'\x7f'):
+    while True:
+        ready, _, _ = select.select([sys.stdin], [], [], 0)
+        if not ready:
+            break
+        key = sys.stdin.read(1)
+        if key in ('\x08', '\x7f'):
             requested = True
     return requested
+
+
+@contextmanager
+def _pass_keyboard_mode():
+    """Enable key polling during a pass without affecting normal prompts."""
+    if os.name != 'nt' and sys.stdin.isatty():
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setcbreak(fd)
+            yield
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+    else:
+        yield
 
 
 def test_polar_pattern(
@@ -359,140 +396,144 @@ def test_polar_pattern(
                 print()
 
             while True:
-                # Time-based synchronization: angle is derived from real elapsed time,
-                # with edge-padding captures before/after the in-range window.
-                pass_measurement_start_idx = len(all_measurements)
-                pass_start_time = time.time()
-                pass_end_time = pass_start_time + pass_duration_padded
-                next_measurement_time = pass_start_time
-                meas_idx = 0
-                rollback_requested = False
+                with _pass_keyboard_mode():
+                    # Time-based synchronization: angle is derived from real elapsed time,
+                    # with edge-padding captures before/after the in-range window.
+                    pass_measurement_start_idx = len(all_measurements)
+                    pass_start_time = time.time()
+                    pass_end_time = pass_start_time + pass_duration_padded
+                    next_measurement_time = pass_start_time
+                    meas_idx = 0
+                    rollback_requested = False
 
-                while meas_idx < padded_resolution:
-                    if _consume_backspace_request():
-                        rollback_requested = True
-                        break
-
-                    now = time.time()
-                    if now >= pass_end_time:
-                        break
-
-                    # Keep capture starts roughly paced by requested interval when possible.
-                    time_to_wait = next_measurement_time - now
-                    while time_to_wait > 0:
+                    while meas_idx < padded_resolution:
                         if _consume_backspace_request():
                             rollback_requested = True
                             break
-                        sleep_chunk = min(0.05, time_to_wait)
-                        time.sleep(sleep_chunk)
-                        time_to_wait = next_measurement_time - time.time()
+
+                        now = time.time()
+                        if now >= pass_end_time:
+                            break
+
+                        # Keep capture starts roughly paced by requested interval when possible.
+                        time_to_wait = next_measurement_time - now
+                        while time_to_wait > 0:
+                            if _consume_backspace_request():
+                                rollback_requested = True
+                                break
+                            sleep_chunk = min(0.05, time_to_wait)
+                            time.sleep(sleep_chunk)
+                            time_to_wait = next_measurement_time - time.time()
+                        if rollback_requested:
+                            break
+
+                        # Preview angle (for logging/errors) based on current elapsed time.
+                        now_for_angle = time.time()
+                        elapsed_preview = np.clip(now_for_angle - pass_start_time, 0.0, pass_duration_padded)
+                        logical_ccw_preview = (-edge_padding_points * degrees_per_measurement) + (elapsed_preview * speed_deg_per_sec)
+                        if pass_rotation_direction == 'counterclockwise':
+                            relative_angle_preview = logical_ccw_preview
+                        else:
+                            relative_angle_preview = total_degrees - logical_ccw_preview
+                        expected_angle_preview = (reference_angle + relative_angle_preview) % 360
+
+                        # Record audio sample (4-channel for beamforming)
+                        try:
+                            audio_data = sd.rec(
+                                int(sample_duration * sample_rate),
+                                samplerate=sample_rate,
+                                channels=num_channels,
+                                device=device_index,
+                                blocking=True
+                            )
+                        except Exception as e:
+                            logger.error(f"Error recording audio at angle {expected_angle_preview:.1f}°: {e}")
+                            continue
+
+                        if _consume_backspace_request():
+                            rollback_requested = True
+                            break
+
+                        # Ensure audio is float32 and normalized to [-1, 1]
+                        audio_data = np.asarray(audio_data).astype(np.float32)
+                        max_val = np.max(np.abs(audio_data))
+                        if max_val > 1.0:
+                            audio_data = audio_data / max_val
+
+                        # Apply processing pipeline using the shared Array_RealTime chain helper
+                        if use_pipeline:
+                            processed_audio = apply_realtime_processing_chain(
+                                block=audio_data,
+                                beamformer=beamformer,
+                                filters=filters,
+                                agc=agc,
+                                sample_rate=sample_rate,
+                                monitor_gain=1.0,
+                                theta_deg=0.0,
+                                freeze_beamformer=bool(freeze_beamformer),
+                                freeze_angle_deg=float(freeze_angle_deg) if freeze_angle_deg is not None else None,
+                            )
+                        else:
+                            processed_audio = np.asarray(audio_data[:, 0], dtype=np.float32)
+
+                        # Calculate RMS and peak levels
+                        rms_level = np.sqrt(np.mean(processed_audio ** 2))
+                        peak_level = np.max(np.abs(processed_audio))
+
+                        # Compute expected angle from elapsed real time at the CENTER of the capture window.
+                        # This keeps angle labels synchronized with turntable motion even under load.
+                        capture_mid_time = time.time() - (sample_duration * 0.5)
+                        elapsed = np.clip(capture_mid_time - pass_start_time, 0.0, pass_duration_padded)
+                        logical_ccw = (-edge_padding_points * degrees_per_measurement) + (elapsed * speed_deg_per_sec)
+                        if pass_rotation_direction == 'counterclockwise':
+                            relative_angle = logical_ccw
+                        else:
+                            relative_angle = total_degrees - logical_ccw
+                        expected_angle = (reference_angle + relative_angle) % 360
+
+                        # Store measurement
+                        measurement = {
+                            'measurement_index': len(all_measurements),
+                            'pass_number': pass_num + 1,
+                            'expected_angle': expected_angle,
+                            'relative_angle': relative_angle,
+                            'timestamp': datetime.now().isoformat(),
+                            'reference_angle': reference_angle,
+                            'rms_level': rms_level,
+                            'peak_level': peak_level,
+                        }
+
+                        all_measurements.append(measurement)
+
+                        # Progress indicator for every measurement so the cadence matches the resolution.
+                        print(f"  Pass {pass_num + 1}, Measurement {meas_idx + 1}/{padded_resolution}: "
+                            f"Angle: {expected_angle:6.1f}° (rel {relative_angle:6.1f}°) | RMS: {20*np.log10(max(rms_level, 1e-10)):7.2f} dB | "
+                                f"Peak: {20*np.log10(max(peak_level, 1e-10)):7.2f} dB")
+
+                        # Schedule next measurement from absolute timeline, not loop execution time.
+                        next_measurement_time += interval
+                        meas_idx += 1
+
                     if rollback_requested:
-                        break
-
-                    # Preview angle (for logging/errors) based on current elapsed time.
-                    now_for_angle = time.time()
-                    elapsed_preview = np.clip(now_for_angle - pass_start_time, 0.0, pass_duration_padded)
-                    logical_ccw_preview = (-edge_padding_points * degrees_per_measurement) + (elapsed_preview * speed_deg_per_sec)
-                    if pass_rotation_direction == 'counterclockwise':
-                        relative_angle_preview = logical_ccw_preview
-                    else:
-                        relative_angle_preview = total_degrees - logical_ccw_preview
-                    expected_angle_preview = (reference_angle + relative_angle_preview) % 360
-
-                    # Record audio sample (4-channel for beamforming)
-                    try:
-                        audio_data = sd.rec(
-                            int(sample_duration * sample_rate),
-                            samplerate=sample_rate,
-                            channels=num_channels,
-                            device=device_index,
-                            blocking=True
-                        )
-                    except Exception as e:
-                        logger.error(f"Error recording audio at angle {expected_angle_preview:.1f}°: {e}")
-                        continue
-
-                    if _consume_backspace_request():
-                        rollback_requested = True
-                        break
-
-                    # Ensure audio is float32 and normalized to [-1, 1]
-                    audio_data = np.asarray(audio_data).astype(np.float32)
-                    max_val = np.max(np.abs(audio_data))
-                    if max_val > 1.0:
-                        audio_data = audio_data / max_val
-
-                    # Apply processing pipeline using the shared Array_RealTime chain helper
-                    if use_pipeline:
-                        processed_audio = apply_realtime_processing_chain(
-                            block=audio_data,
-                            beamformer=beamformer,
-                            filters=filters,
-                            agc=agc,
-                            sample_rate=sample_rate,
-                            monitor_gain=1.0,
-                            theta_deg=0.0,
-                            freeze_beamformer=bool(freeze_beamformer),
-                            freeze_angle_deg=float(freeze_angle_deg) if freeze_angle_deg is not None else None,
+                        removed = len(all_measurements) - pass_measurement_start_idx
+                        if removed > 0:
+                            del all_measurements[pass_measurement_start_idx:]
+                        print(
+                            f"  Backspace detected: rolled back pass {pass_num + 1} "
+                            f"(removed {removed} measurements)."
                         )
                     else:
-                        processed_audio = np.asarray(audio_data[:, 0], dtype=np.float32)
-
-                    # Calculate RMS and peak levels
-                    rms_level = np.sqrt(np.mean(processed_audio ** 2))
-                    peak_level = np.max(np.abs(processed_audio))
-
-                    # Compute expected angle from elapsed real time at the CENTER of the capture window.
-                    # This keeps angle labels synchronized with turntable motion even under load.
-                    capture_mid_time = time.time() - (sample_duration * 0.5)
-                    elapsed = np.clip(capture_mid_time - pass_start_time, 0.0, pass_duration_padded)
-                    logical_ccw = (-edge_padding_points * degrees_per_measurement) + (elapsed * speed_deg_per_sec)
-                    if pass_rotation_direction == 'counterclockwise':
-                        relative_angle = logical_ccw
-                    else:
-                        relative_angle = total_degrees - logical_ccw
-                    expected_angle = (reference_angle + relative_angle) % 360
-
-                    # Store measurement
-                    measurement = {
-                        'measurement_index': len(all_measurements),
-                        'pass_number': pass_num + 1,
-                        'expected_angle': expected_angle,
-                        'relative_angle': relative_angle,
-                        'timestamp': datetime.now().isoformat(),
-                        'reference_angle': reference_angle,
-                        'rms_level': rms_level,
-                        'peak_level': peak_level,
-                    }
-
-                    all_measurements.append(measurement)
-
-                    # Progress indicator for every measurement so the cadence matches the resolution.
-                    print(f"  Pass {pass_num + 1}, Measurement {meas_idx + 1}/{padded_resolution}: "
-                        f"Angle: {expected_angle:6.1f}° (rel {relative_angle:6.1f}°) | RMS: {20*np.log10(max(rms_level, 1e-10)):7.2f} dB | "
-                            f"Peak: {20*np.log10(max(peak_level, 1e-10)):7.2f} dB")
-
-                    # Schedule next measurement from absolute timeline, not loop execution time.
-                    next_measurement_time += interval
-                    meas_idx += 1
+                        if meas_idx < padded_resolution:
+                            print(
+                                f"  Pass {pass_num + 1}: captured {meas_idx}/{padded_resolution} samples before padded rotation window ended "
+                                f"({pass_duration_padded:.2f}s)."
+                            )
 
                 if rollback_requested:
-                    removed = len(all_measurements) - pass_measurement_start_idx
-                    if removed > 0:
-                        del all_measurements[pass_measurement_start_idx:]
-                    print(
-                        f"  Backspace detected: rolled back pass {pass_num + 1} "
-                        f"(removed {removed} measurements)."
-                    )
                     input(f"Press Enter to restart pass {pass_num + 1}/{num_passes}...")
                     print()
                     continue
 
-                if meas_idx < padded_resolution:
-                    print(
-                        f"  Pass {pass_num + 1}: captured {meas_idx}/{padded_resolution} samples before padded rotation window ended "
-                        f"({pass_duration_padded:.2f}s)."
-                    )
                 break
         
     except KeyboardInterrupt:
