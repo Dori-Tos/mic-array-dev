@@ -4,7 +4,7 @@ from classes.DOAEstimator import  IterativeDOAEstimator
 from classes.Beamformer import DASBeamformer, MVDRBeamformer
 from classes.EchoCanceller import EchoCanceller
 from classes.Filter import HighPassFilter, LowPassFilter, BandPassFilter, BandStopFilter, WienerFilter, SpectralSubtractionFilter
-from classes.AGC import AGC, TwoStageAGC, Amplifier, AdaptiveAmplifier, AGCChain, Limiter, PeakHoldAGC, PedalboardAGC
+from classes.AGC import AGC, TwoStageAGC, Amplifier, AdaptiveAmplifier, NoiseAwareAdaptiveAmplifier, AGCChain, Limiter, PeakHoldAGC, PedalboardAGC
 from classes.Codec import G711Codec, OpusCodec
 
 import time
@@ -194,18 +194,18 @@ if __name__ == "__main__":
     ]
     
     agc = AGCChain(logger=logger, stages=[
-        AdaptiveAmplifier(
+        NoiseAwareAdaptiveAmplifier(
             logger=logger,
-            target_rms=0.08,          # Boost normal speech toward target operating level
-            min_gain=1.0,             # Do NOT attenuate normal program material
-            max_gain=6.0,             # Aggressive limit to prevent oscillation (was 12.0)
-            adapt_alpha=0.04,         # Balanced adaptation speed
-            speech_activity_rms=0.00012,  # Treat lower-level speech as active (restore quiet voice audibility)
-            silence_decay_alpha=0.008,    # Slower decay to avoid dropping between words/syllables
-            activity_hold_ms=600.0,       # Hold gain after speech to preserve phrase continuity
-            peak_protect_threshold=0.30,  # More generous headroom to prevent oscillation (was 0.25)
-            peak_protect_strength=1.0,    # Maximum protection (was 0.85)
-            max_gain_warn_rms_min=0.001,  # Suppress max-gain warnings for near-silence frames
+            target_rms=0.08,          # Target 0.08 (-21.9 dB) for normal speech baseline
+            min_gain=0.7,             # Allow attenuation to 0.7x to suppress noise/silence
+            max_gain_baseline=6.0,    # Baseline max (actual will be capped by noise floor)
+            gain_up_alpha=0.008,      # VERY SLOW gain increase (prevents noise chasing)
+            gain_down_alpha=0.15,     # Fast gain decrease to immediately suppress peaks
+            snr_threshold_db=8.0,     # Only boost when SNR > 8 dB (speech, not noise)
+            noise_floor_alpha=0.997,  # Very slow noise floor adaptation (prevents jitter)
+            activity_hold_ms=100.0,   # Hold 200ms after speech ends before full decay
+            peak_protect_threshold=0.30,  # Reduce gain when peaks exceed 0.30
+            peak_protect_strength=1.0,    # Strong peak-based damping
         ),
         
         PedalboardAGC(

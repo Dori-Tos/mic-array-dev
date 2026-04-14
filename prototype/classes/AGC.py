@@ -227,6 +227,160 @@ class AdaptiveAmplifier:
         return np.asarray(y, dtype=np.float32)
 
 
+class NoiseAwareAdaptiveAmplifier:
+    """
+    Noise-aware adaptive amplifier that prevents background noise poisoning by:
+    1. Continuously estimating the noise floor (via minimum energy in recent history)
+    2. Only increasing gain when SNR > threshold (typical: 6-10 dB)
+    3. Using asymmetric dynamics: fast gain-down, very slow gain-up (prevents chasing artifacts)
+    4. Capping max_gain inversely with noise floor so residual noise cannot bloom
+    
+    This solves the "ghost noise" problem where AGC amplifies post-event residual noise
+    into audible artifacts that persist and worsen over time.
+    
+    :param target_rms: Desired RMS at output during speech (default: 0.08)
+    :param min_gain: Minimum gain (typically 0.7-1.0 to allow attenuation of silence/noise)
+    :param max_gain_baseline: Maximum gain baseline (default: 6.0); actual max will be capped by noise floor
+    :param gain_up_alpha: Exponential smoothing for gain increase (SLOW; default: 0.008 = very smooth)
+    :param gain_down_alpha: Exponential smoothing for gain decrease (FAST; default: 0.1 = fast response)
+    :param snr_threshold_db: Only increase gain when SNR > this threshold (default: 8.0 dB)
+    :param noise_floor_alpha: Exponential smoothing for noise floor estimate (default: 0.997 = very slow)
+    :param activity_hold_ms: Hold gain after speech ends before allowing decay (default: 200 ms)
+    :param peak_protect_threshold: Reduce gain when peaks exceed this (default: 0.35)
+    :param peak_protect_strength: Strength of peak damping (default: 1.0)
+    """
+    
+    def __init__(
+        self,
+        logger: logging.Logger,
+        target_rms: float = 0.08,
+        min_gain: float = 0.7,
+        max_gain_baseline: float = 6.0,
+        gain_up_alpha: float = 0.008,
+        gain_down_alpha: float = 0.1,
+        snr_threshold_db: float = 8.0,
+        noise_floor_alpha: float = 0.997,
+        activity_hold_ms: float = 200.0,
+        peak_protect_threshold: float = 0.35,
+        peak_protect_strength: float = 1.0,
+    ):
+        if target_rms <= 0:
+            raise ValueError("target_rms must be > 0")
+        if min_gain <= 0 or max_gain_baseline <= 0 or min_gain > max_gain_baseline:
+            raise ValueError("min_gain and max_gain_baseline must be > 0 and min <= max")
+        if not (0.001 <= gain_up_alpha <= 0.5):
+            raise ValueError("gain_up_alpha must be in [0.001, 0.5]")
+        if not (0.01 <= gain_down_alpha <= 1.0):
+            raise ValueError("gain_down_alpha must be in [0.01, 1.0]")
+        if snr_threshold_db < 0:
+            raise ValueError("snr_threshold_db must be >= 0")
+        if not (0.9 <= noise_floor_alpha < 1.0):
+            raise ValueError("noise_floor_alpha must be in [0.9, 1.0)")
+        
+        self.logger = logger
+        self.target_rms = float(target_rms)
+        self.min_gain = float(min_gain)
+        self.max_gain_baseline = float(max_gain_baseline)
+        self.gain_up_alpha = float(gain_up_alpha)
+        self.gain_down_alpha = float(gain_down_alpha)
+        self.snr_threshold_db = float(snr_threshold_db)
+        self.noise_floor_alpha = float(noise_floor_alpha)
+        self.activity_hold_ms = float(activity_hold_ms)
+        self.peak_protect_threshold = float(peak_protect_threshold)
+        self.peak_protect_strength = float(peak_protect_strength)
+        
+        self.current_gain = 1.0
+        self.noise_floor_rms = 0.0001  # Start with conservative floor estimate
+        self._last_active_time = time.time()
+        self._last_log_time = time.time()
+        self._eps = 1e-9
+    
+    def reset(self):
+        self.current_gain = 1.0
+        self.noise_floor_rms = 0.0001
+        self._last_active_time = time.time()
+        self._last_log_time = time.time()
+    
+    def process(self, samples: np.ndarray, sample_rate: float) -> np.ndarray:
+        """
+        Apply noise-aware adaptive amplification.
+        Prevents AGC from chasing and amplifying residual noise into audible artifacts.
+        """
+        x = np.asarray(samples, dtype=np.float32).reshape(-1)
+        if x.size == 0:
+            return x
+        
+        rms = float(np.sqrt(np.mean(x * x) + self._eps))
+        peak = float(np.max(np.abs(x)))
+        current_time = time.time()
+        
+        # Update noise floor estimate: smoothly track the minimum energy
+        # This represents the true background noise floor
+        self.noise_floor_rms = (
+            self.noise_floor_alpha * self.noise_floor_rms +
+            (1.0 - self.noise_floor_alpha) * min(rms, self.noise_floor_rms * 1.5)
+        )
+        self.noise_floor_rms = float(np.clip(self.noise_floor_rms, 1e-5, 0.01))
+        
+        # Compute SNR in dB
+        snr_db = 20.0 * float(np.log10(max(rms, self._eps) / max(self.noise_floor_rms, self._eps)))
+        
+        # Only allow gain to increase if SNR is above threshold (indicating speech, not noise)
+        # Otherwise, allow only gain decrease to prevent noise amplification
+        is_high_snr = snr_db >= self.snr_threshold_db
+        
+        if is_high_snr:
+            self._last_active_time = current_time
+        
+        in_hold = (current_time - self._last_active_time) <= (self.activity_hold_ms * 1e-3)
+        can_increase_gain = is_high_snr or in_hold
+        
+        # Desired gain based on RMS
+        desired_unclamped = self.target_rms / max(rms, self._eps)
+        
+        # Dynamic max gain cap based on noise floor:
+        # If noise floor is high, reduce max_gain so it doesn't get amplified
+        # Formula: max_gain_effective = min(baseline, target / (k * noise_floor))
+        # where k=2-4 provides safety margin
+        k = 3.0
+        max_gain_noise_limited = self.target_rms / max(k * self.noise_floor_rms, self._eps)
+        max_gain_effective = min(self.max_gain_baseline, max_gain_noise_limited)
+        
+        desired_gain = float(np.clip(desired_unclamped, self.min_gain, max_gain_effective))
+        
+        # Peak protect: reduce gain when peaks are high
+        if peak > self.peak_protect_threshold:
+            peak_damping = 1.0 - self.peak_protect_strength * min(1.0, (peak - self.peak_protect_threshold) / (1.0 - self.peak_protect_threshold))
+            desired_gain *= peak_damping
+        
+        # Asymmetric gain adaptation: fast down, slow up
+        if desired_gain > self.current_gain:
+            if can_increase_gain:
+                # Slow gain increase only when SNR is high
+                self.current_gain += self.gain_up_alpha * (desired_gain - self.current_gain)
+            # else: hold gain, do not increase
+        else:
+            # Fast gain decrease to immediately suppress loud events
+            self.current_gain += self.gain_down_alpha * (desired_gain - self.current_gain)
+        
+        self.current_gain = float(np.clip(self.current_gain, self.min_gain, max_gain_effective))
+        
+        # Apply amplification
+        y = x * self.current_gain
+        peak_after = peak * self.current_gain
+        
+        # Debug logging (every 1 second)
+        if current_time - self._last_log_time >= 1.0:
+            self.logger.debug(
+                f"[NoiseAwareAdaptiveAmplifier] RMS: {rms:.5f} | Noise floor: {self.noise_floor_rms:.5f} | "
+                f"SNR: {snr_db:.1f} dB | Current gain: {self.current_gain:.2f}x (max eff: {max_gain_effective:.2f}x) | "
+                f"Peak before: {peak:.4f} → after: {peak_after:.4f} | HighSNR: {is_high_snr}"
+            )
+            self._last_log_time = current_time
+        
+        return np.asarray(y, dtype=np.float32)
+
+
 class AGCChain:
     """
     Chain multiple AGC/processing stages (Amplifier, Limiter, AGC, PeakHoldAGC, etc.).
