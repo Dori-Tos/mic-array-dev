@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator, MultipleLocator, FormatStrFormatter
 from pathlib import Path
 import argparse
 
@@ -72,6 +73,18 @@ def plot_directivity(
         df[angle_column] = ((df[angle_column] + 180.0) % 360.0) - 180.0
         df = df[(df[angle_column] >= -90.0) & (df[angle_column] <= 90.0)]
         df = df.sort_values(angle_column).reset_index(drop=True)
+
+    # Use sparse, readable angular tick labels to avoid overlap.
+    theta_ticks = np.arange(-90, 91, 30) if quarter_graph else np.arange(0, 360, 45)
+
+    # Build integer-only dB ticks to remove decimal labels like 0.0, -2.5, ...
+    data_min_db = float(np.floor(df['rms_dbfs'].min()))
+    if has_peak_dbfs:
+        data_min_db = float(np.floor(min(data_min_db, df['peak_dbfs'].min())))
+    if min_scale is not None:
+        data_min_db = float(np.floor(min_scale))
+    db_floor = int(5 * np.floor(data_min_db / 5.0))
+    db_ticks = np.arange(db_floor, 1, 5)
     
     # Check for peaks - ReSpeaker uses 'peaks' column
     peaks_available = 'peaks' in df.columns and df['peaks'].any()
@@ -104,6 +117,7 @@ def plot_directivity(
         ax1.plot(angles_rad, rms_plot, 'b-o', linewidth=2, markersize=4, label='RMS')
         ax1.set_theta_zero_location('N')
         ax1.set_theta_direction(-1)
+        ax1.set_thetagrids(theta_ticks)
         if quarter_graph:
             ax1.set_thetamin(-90)
             ax1.set_thetamax(90)
@@ -112,6 +126,8 @@ def plot_directivity(
         ax1.legend(loc='upper right')
         if min_scale is not None:
             ax1.set_ylim([min_scale, 0])
+        ax1.set_yticks(db_ticks)
+        ax1.yaxis.set_major_formatter(FormatStrFormatter('%d'))
 
         # Polar plot for Peak level
         ax2 = plt.subplot(222, projection='polar')
@@ -125,6 +141,7 @@ def plot_directivity(
         ax2.plot(angles_rad, peak_plot, 'r-s', linewidth=2, markersize=4, label='Peak')
         ax2.set_theta_zero_location('N')
         ax2.set_theta_direction(-1)
+        ax2.set_thetagrids(theta_ticks)
         if quarter_graph:
             ax2.set_thetamin(-90)
             ax2.set_thetamax(90)
@@ -133,6 +150,8 @@ def plot_directivity(
         ax2.legend(loc='upper right')
         if min_scale is not None:
             ax2.set_ylim([min_scale, 0])
+        ax2.set_yticks(db_ticks)
+        ax2.yaxis.set_major_formatter(FormatStrFormatter('%d'))
 
         # Cartesian plot comparing RMS and Peak
         ax3 = plt.subplot(223)
@@ -144,6 +163,9 @@ def plot_directivity(
         ax3.grid(True, alpha=0.3)
         ax3.legend()
         ax3.set_xlim([-90, 90] if quarter_graph else [0, 360])
+        ax3.xaxis.set_major_locator(MultipleLocator(30 if quarter_graph else 45))
+        ax3.yaxis.set_major_locator(MaxNLocator(integer=True))
+        ax3.yaxis.set_major_formatter(FormatStrFormatter('%d'))
         if min_scale is not None:
             ax3.set_ylim([min_scale, 0])
 
@@ -156,6 +178,9 @@ def plot_directivity(
             ax4.set_title('Directivity Pattern (Relative to Locked DOA)', fontsize=12, fontweight='bold')
             ax4.grid(True, alpha=0.3)
             ax4.set_xlim([-90, 90] if quarter_graph else [0, 360])
+            ax4.xaxis.set_major_locator(MultipleLocator(30 if quarter_graph else 45))
+            ax4.yaxis.set_major_locator(MaxNLocator(integer=True))
+            ax4.yaxis.set_major_formatter(FormatStrFormatter('%d'))
             if min_scale is not None:
                 ax4.set_ylim([min_scale, 0])
         elif has_doa_angle:
@@ -165,6 +190,9 @@ def plot_directivity(
             ax4.set_title('Direction of Arrival Detection', fontsize=12, fontweight='bold')
             ax4.grid(True, alpha=0.3)
             ax4.set_xlim([-90, 90] if quarter_graph else [0, 360])
+            ax4.xaxis.set_major_locator(MultipleLocator(30 if quarter_graph else 45))
+            ax4.yaxis.set_major_locator(MaxNLocator(integer=True))
+            ax4.yaxis.set_major_formatter(FormatStrFormatter('%d'))
             if quarter_graph:
                 ax4.set_ylim([-90, 90])
             else:
@@ -177,6 +205,9 @@ def plot_directivity(
             ax4.set_title('Directivity Pattern', fontsize=12, fontweight='bold')
             ax4.grid(True, alpha=0.3)
             ax4.set_xlim([-90, 90] if quarter_graph else [0, 360])
+            ax4.xaxis.set_major_locator(MultipleLocator(30 if quarter_graph else 45))
+            ax4.yaxis.set_major_locator(MaxNLocator(integer=True))
+            ax4.yaxis.set_major_formatter(FormatStrFormatter('%d'))
             if min_scale is not None:
                 ax4.set_ylim([min_scale, 0])
 
@@ -223,6 +254,7 @@ def plot_directivity(
         ax1.plot(angles_rad, rms_plot, 'b-o', linewidth=2, markersize=4)
         ax1.set_theta_zero_location('N')
         ax1.set_theta_direction(-1)
+        ax1.set_thetagrids(theta_ticks)
         if quarter_graph:
             ax1.set_thetamin(-90)
             ax1.set_thetamax(90)
@@ -233,6 +265,8 @@ def plot_directivity(
         ax1.grid(True)
         if min_scale is not None:
             ax1.set_ylim([min_scale, 0])
+        ax1.set_yticks(db_ticks)
+        ax1.yaxis.set_major_formatter(FormatStrFormatter('%d'))
 
         # Add overall title with metadata
         test_name = Path(csv_file).stem

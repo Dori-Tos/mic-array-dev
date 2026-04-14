@@ -135,7 +135,7 @@ if __name__ == "__main__":
             bitrate=24000,
             frame_duration_ms=10,
             application="voip",
-            remote_host="172.98.1.61",
+            remote_host="172.98.1.59",
             remote_port=5004,
         )
     else:
