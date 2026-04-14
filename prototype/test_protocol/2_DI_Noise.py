@@ -563,6 +563,18 @@ def test_polar_pattern(
     # Sort by bin index to preserve monotonic angle order
     grouped.sort_values('angle_bin', inplace=True)
     grouped.drop(columns=['angle_bin'], inplace=True)
+
+    # DI uses power, not dB. Compute the average noise power in the linear domain
+    # from the uniformly spaced angle bins so each direction contributes equally.
+    noise_avg_power_linear = float(np.mean(np.square(grouped['rms_level'].to_numpy(dtype=float))))
+    noise_avg_rms_linear = float(np.sqrt(noise_avg_power_linear))
+    noise_avg_rms_dbfs = float(20.0 * np.log10(max(noise_avg_rms_linear, min_level)))
+
+    # Store the summary value on every row so the CSV remains backward-compatible
+    # while still carrying the total noise power needed for DI calculations.
+    grouped['noise_avg_power_linear'] = noise_avg_power_linear
+    grouped['noise_avg_rms_linear'] = noise_avg_rms_linear
+    grouped['noise_avg_rms_dbfs'] = noise_avg_rms_dbfs
     
     # Save averaged results
     averaged_csv_file = output_path / f"polar_pattern_averaged_{test_timestamp}.csv"
@@ -591,6 +603,10 @@ def test_polar_pattern(
     print(f"\n  Peak Level:")
     print(f"    Range: {peak_range:.1f} dB ({peak_min:.1f} to {peak_max:.1f} dBFS)")
     print(f"    Maximum at: {peak_max_angle:.1f}°")
+    print(f"\n  Noise Power Summary (for DI):")
+    print(f"    Average noise power (linear): {noise_avg_power_linear:.8f}")
+    print(f"    Average noise RMS: {noise_avg_rms_linear:.6f}")
+    print(f"    Average noise RMS: {noise_avg_rms_dbfs:.2f} dBFS")
     print(f"\n  Data saved to:")
     print(f"    Raw data (all passes):  {raw_csv_file}")
     print(f"    Averaged results:       {averaged_csv_file}")
