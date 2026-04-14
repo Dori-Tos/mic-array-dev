@@ -12,6 +12,9 @@ from collections import deque
 from math import gcd
 
 
+_UNSET = object()
+
+
 def apply_realtime_processing_chain(
     block: np.ndarray,
     beamformer,
@@ -133,6 +136,8 @@ class Array_RealTime(Array):
         self._last_catchup_log = 0.0
         self._processing_thread = None
         self._processing_stop_event = threading.Event()
+        self._processing_input_channel = 0
+        self._last_input_blocksize = 0
 
     @property
     def is_running(self) -> bool:
@@ -150,6 +155,7 @@ class Array_RealTime(Array):
             raise ValueError("Cannot start stream without microphones")
 
         self.logger.info("Starting realtime audio processing")
+        self._last_input_blocksize = int(blocksize)
         self._processing_stop_event.clear()
         self._processing_thread = threading.Thread(target=self._process_audio_thread, daemon=True)
         self._processing_thread.start()
@@ -167,6 +173,75 @@ class Array_RealTime(Array):
         self._stream.start()
         self._is_running = True
         self.logger.info(f"Audio stream started: {self.sampling_rate}Hz, {len(self.mic_list)} channels, blocksize={blocksize}")
+
+    def reconfigure_runtime(
+        self,
+        *,
+        mic_list=_UNSET,
+        doa_estimator=_UNSET,
+        beamformer=_UNSET,
+        echo_canceller=_UNSET,
+        filters=_UNSET,
+        agc=_UNSET,
+        processing_input_channel: int | object = _UNSET,
+        restart_if_running: bool = True,
+        blocksize: int | None = None,
+        restore_output_monitoring: bool = True,
+    ):
+        """
+        Reconfigure processing topology while preserving instance state.
+
+        This supports switching between full array beamforming and single-mic
+        processing chains at runtime. If the stream is running and topology
+        changes are requested, the stream is safely restarted.
+        """
+        was_running = self._is_running
+        output_was_running = self._output_stream is not None or self._codec_stream_active
+
+        requested_blocksize = self._last_input_blocksize if blocksize is None else int(blocksize)
+
+        if mic_list is not _UNSET:
+            self.mic_list = mic_list
+        if doa_estimator is not _UNSET:
+            self.doa_estimator = doa_estimator
+        if beamformer is not _UNSET:
+            self.beamformer = beamformer
+        if echo_canceller is not _UNSET:
+            self.echo_canceller = echo_canceller
+        if filters is not _UNSET:
+            self.filters = filters
+        if agc is not _UNSET:
+            self.agc = agc
+        if processing_input_channel is not _UNSET:
+            self._processing_input_channel = int(processing_input_channel)
+
+        # Clear cached output/state to avoid stale blocks after topology switch.
+        with self._lock:
+            self._latest_block = None
+            self._latest_per_mic = {}
+            self._latest_doa = None
+            self._latest_beamformed = None
+        with self._output_fifo_lock:
+            self._output_fifo.clear()
+            self._output_current_chunk = np.zeros(0, dtype=np.float32)
+            self._output_buffered_samples = 0
+
+        if was_running and restart_if_running:
+            self.stop_realtime()
+            self.start_realtime(blocksize=requested_blocksize)
+            if restore_output_monitoring and output_was_running:
+                self.start_output_monitoring()
+
+    def _extract_processing_mono(self, block: np.ndarray) -> np.ndarray:
+        """Fallback mono extraction when no beamformer is active."""
+        if block.ndim == 1:
+            return np.asarray(block, dtype=np.float32).reshape(-1)
+        if block.ndim != 2 or block.shape[1] == 0:
+            return np.zeros(0, dtype=np.float32)
+
+        ch = int(self._processing_input_channel)
+        ch = max(0, min(ch, block.shape[1] - 1))
+        return np.asarray(block[:, ch], dtype=np.float32).reshape(-1)
 
     def stop_realtime(self):
         if not self._is_running:
@@ -291,13 +366,7 @@ class Array_RealTime(Array):
         self.logger.info(f"Processing thread started (downsample_rate: {self.downsample_rate})")
         block_count = 0
         start_time = time.monotonic()
-        
-        # Store original sample rate for restoration
-        self._original_sampling_rate = self.sampling_rate
-        original_bf_rate = getattr(self.beamformer, "sample_rate", None)
-        doa_beamformer = getattr(self.doa_estimator, "beamformer", None)
-        original_doa_bf_rate = getattr(doa_beamformer, "sample_rate", None)
-        
+
         while not self._processing_stop_event.is_set():
             try:
                 block = self._audio_queue.get(timeout=0.1)
@@ -308,7 +377,6 @@ class Array_RealTime(Array):
                 self.logger.debug("[Processing] Queue timeout, no block received")
                 continue
 
-            # Catch-up mode: when backlog grows, skip stale blocks and keep newest ones.
             if queue_size > self._queue_catchup_trigger:
                 dropped_stale = 0
                 while self._audio_queue.qsize() > self._queue_keep_depth:
@@ -323,35 +391,34 @@ class Array_RealTime(Array):
                     self.logger.debug(f"[Catch-up] Dropped {dropped_stale} stale queued blocks, queue_size now {queue_size}")
                     self._last_catchup_log = now_log
 
-            # Apply downsampling if needed
             original_rate = self.sampling_rate
             if self.downsample_rate is not None and self.downsample_rate < self.sampling_rate:
                 block = self._downsample_block(block)
-                self.sampling_rate = self.downsample_rate  # Temporarily change sample rate
-                if hasattr(self.beamformer, "sample_rate"):
+                self.sampling_rate = self.downsample_rate
+                if self.beamformer is not None and hasattr(self.beamformer, "sample_rate"):
                     self.beamformer.sample_rate = int(self.downsample_rate)
-                if doa_beamformer is not None and hasattr(doa_beamformer, "sample_rate"):
-                    doa_beamformer.sample_rate = int(self.downsample_rate)
+                doa_bf = getattr(self.doa_estimator, "beamformer", None)
+                if doa_bf is not None and hasattr(doa_bf, "sample_rate"):
+                    doa_bf.sample_rate = int(self.downsample_rate)
                 self.logger.debug(f"[Processing] Downsampled to {self.downsample_rate} Hz, new block shape: {block.shape}")
 
-            # Extract per-microphone samples
             per_mic = {}
             for idx, mic in enumerate(self.mic_list):
                 channel_index = mic.channel_number if mic.channel_number is not None else idx
                 if 0 <= channel_index < block.shape[1]:
                     per_mic[mic.channel_number] = block[:, channel_index].copy()
 
-            # Estimate DOA
             doa_value = None
             start_doa = time.monotonic()
             should_skip_doa = queue_size > self._skip_doa_queue_threshold and self._latest_doa is not None
+            doa_fn = getattr(self.doa_estimator, "estimate_doa", None)
             if should_skip_doa:
                 doa_value = self._latest_doa
                 self.logger.debug(f"[Processing] Skipping DOA update due to backlog (queue_size={queue_size}), reusing {doa_value:.1f}°")
-            elif callable(self.doa_estimator.estimate_doa):
+            elif callable(doa_fn):
                 try:
-                    self.logger.debug(f"[Processing] Starting DOA estimation")
-                    doa_value = self.doa_estimator.estimate_doa(block)
+                    self.logger.debug("[Processing] Starting DOA estimation")
+                    doa_value = doa_fn(block)
                     elapsed_doa = time.monotonic() - start_doa
                     self.logger.debug(f"[DOA] Estimated: {doa_value:.1f}° (took {elapsed_doa*1000:.2f}ms)")
                 except Exception as e:
@@ -359,113 +426,101 @@ class Array_RealTime(Array):
                     self.logger.error(f"[DOA Estimation Error] {type(e).__name__}: {e} (after {elapsed_doa*1000:.2f}ms)")
                     doa_value = None
 
-            # Apply beamforming
             beamformed_value = None
+            mono_out = np.zeros(0, dtype=np.float32)
             start_bf = time.monotonic()
             try:
-                if isinstance(doa_value, (int, float, np.integer, np.floating)):
-                    self.beamformer.set_steering_angle(float(doa_value))
-                    self.logger.debug(f"[Processing] Steering angle set to {doa_value:.1f}°")
+                if self.beamformer is not None and isinstance(doa_value, (int, float, np.integer, np.floating)):
+                    if hasattr(self.beamformer, "set_steering_angle"):
+                        self.beamformer.set_steering_angle(float(doa_value))
 
-                if callable(getattr(self.beamformer, "apply", None)):
-                    self.logger.debug(f"[Processing] Starting beamformer apply")
-                    beamformed = self.beamformer.apply(block)
+                apply_fn = getattr(self.beamformer, "apply", None)
+                if callable(apply_fn):
+                    beamformed = apply_fn(block)
                     if beamformed is not None:
-                        beamformed_arr = np.asarray(beamformed)
+                        beamformed_arr = np.asarray(beamformed, dtype=np.float32).reshape(-1)
                         if beamformed_arr.size > 0:
                             beamformed_value = beamformed_arr.copy()
-                            
-                            # Queue audio chunk for real-time output playback
-                            mono_raw = np.asarray(beamformed_arr, dtype=np.float32).reshape(-1)
-                            peak = float(np.max(np.abs(mono_raw))) if mono_raw.size > 0 else 0.0
-                            now_alert = time.monotonic()
-                            if peak > 1.0 and (now_alert - self._alert_state["beamformer_peak_last"]) >= self._warn_interval_s:
-                                self.logger.warning(
-                                    f"[Peak Alert] Beamformer output peak={peak:.3f} (>1.0). Upstream energy may be too high for headroom."
-                                )
-                                self._alert_state["beamformer_peak_last"] = now_alert
-                            
-                            # DIAGNOSTIC: Check for numerical issues in beamformer output
-                            # has_nan = np.any(np.isnan(mono_raw))
-                            # has_inf = np.any(np.isinf(mono_raw))
-                            # num_extreme = np.sum(np.abs(mono_raw) > 10.0)  # Values > 10.0 are extreme
-                            # if has_nan or has_inf or num_extreme > 0:
-                            #     self.logger.warning(
-                            #         f"[Beamformer Output] NaN:{has_nan} Inf:{has_inf} Extreme:{num_extreme} Peak:{peak:.4f}"
-                            #     )
-                            
-                            # Audio is already normalized at capture (_audio_callback)
-                            # Beamformer receives [-1, 1] normalized input and outputs [-1, 1] range
-                            mono_out = mono_raw
-                            # Apply optional post-beamforming filters before AGC.
-                            for filt in self.filters:
-                                if callable(getattr(filt, "apply", None)):
-                                    try:
-                                        mono_out = np.asarray(filt.apply(mono_out), dtype=np.float32).reshape(-1)
-                                    except Exception as filter_err:
-                                        self.logger.warning(f"[Filter] {type(filter_err).__name__}: {filter_err}")
-                            output_sample_rate = self.downsample_rate if self.downsample_rate is not None else self.sampling_rate
-                            mono_out = self.agc.process(mono_out, sample_rate=output_sample_rate)
-                            post_agc_peak = float(np.max(np.abs(mono_out))) if mono_out.size > 0 else 0.0
-                            if post_agc_peak >= self._post_agc_warn_threshold and (now_alert - self._alert_state["post_agc_peak_last"]) >= self._warn_interval_s:
-                                self.logger.warning(
-                                    f"[Peak Alert] Post-AGC peak={post_agc_peak:.3f} (threshold {self._post_agc_warn_threshold:.2f}). "
-                                    "Dynamics stage may be near saturation."
-                                )
-                                self._alert_state["post_agc_peak_last"] = now_alert
-
-                            mono_out = mono_out * self.monitor_gain
-                            final_peak = float(np.max(np.abs(mono_out))) if mono_out.size > 0 else 0.0
-                            if final_peak >= self._final_warn_threshold and (now_alert - self._alert_state["final_peak_last"]) >= self._warn_interval_s:
-                                self.logger.warning(
-                                    f"[Peak Alert] Final monitor peak={final_peak:.3f} (threshold {self._final_warn_threshold:.2f}). "
-                                    "Output callback clipping risk is high."
-                                )
-                                self._alert_state["final_peak_last"] = now_alert
-
-                            processing_rate = self.downsample_rate if self.downsample_rate is not None else self.sampling_rate
-                            mono_out = self._resample_to_playback_rate(mono_out, int(processing_rate))
-
-                            if self.output_mode == "codec":
-                                self._send_codec_chunk(mono_out, int(processing_rate))
-                            else:
-                                with self._output_fifo_lock:
-                                    self._output_fifo.append(mono_out)
-                                    self._output_buffered_samples += mono_out.size
-                                    while self._output_buffered_samples > self._output_max_buffer_samples and len(self._output_fifo) > 0:
-                                        old = self._output_fifo.popleft()
-                                        self._output_buffered_samples -= old.size
+                            mono_out = beamformed_arr
                             elapsed_bf = time.monotonic() - start_bf
                             self.logger.debug(f"[Beamforming] Output shape: {beamformed_arr.shape} (took {elapsed_bf*1000:.2f}ms)")
-                    else:
-                        self.logger.warning("[Beamforming] apply() returned None")
+                else:
+                    mono_out = self._extract_processing_mono(block)
             except Exception as e:
                 elapsed_bf = time.monotonic() - start_bf
                 self.logger.error(f"[Beamforming Error] {type(e).__name__}: {e} (after {elapsed_bf*1000:.2f}ms)")
                 beamformed_value = None
-            
-            # Restore original sample rate if downsampled
+
+            if mono_out.size > 0:
+                now_alert = time.monotonic()
+                peak = float(np.max(np.abs(mono_out)))
+                if self.beamformer is not None and peak > 1.0 and (now_alert - self._alert_state["beamformer_peak_last"]) >= self._warn_interval_s:
+                    self.logger.warning(
+                        f"[Peak Alert] Beamformer output peak={peak:.3f} (>1.0). Upstream energy may be too high for headroom."
+                    )
+                    self._alert_state["beamformer_peak_last"] = now_alert
+
+                for filt in self.filters or []:
+                    if callable(getattr(filt, "apply", None)):
+                        try:
+                            mono_out = np.asarray(filt.apply(mono_out), dtype=np.float32).reshape(-1)
+                        except Exception as filter_err:
+                            self.logger.warning(f"[Filter] {type(filter_err).__name__}: {filter_err}")
+
+                output_sample_rate = self.downsample_rate if self.downsample_rate is not None else self.sampling_rate
+                if self.agc is not None:
+                    mono_out = np.asarray(self.agc.process(mono_out, sample_rate=output_sample_rate), dtype=np.float32).reshape(-1)
+
+                post_agc_peak = float(np.max(np.abs(mono_out))) if mono_out.size > 0 else 0.0
+                if post_agc_peak >= self._post_agc_warn_threshold and (now_alert - self._alert_state["post_agc_peak_last"]) >= self._warn_interval_s:
+                    self.logger.warning(
+                        f"[Peak Alert] Post-AGC peak={post_agc_peak:.3f} (threshold {self._post_agc_warn_threshold:.2f}). "
+                        "Dynamics stage may be near saturation."
+                    )
+                    self._alert_state["post_agc_peak_last"] = now_alert
+
+                mono_out = mono_out * self.monitor_gain
+                final_peak = float(np.max(np.abs(mono_out))) if mono_out.size > 0 else 0.0
+                if final_peak >= self._final_warn_threshold and (now_alert - self._alert_state["final_peak_last"]) >= self._warn_interval_s:
+                    self.logger.warning(
+                        f"[Peak Alert] Final monitor peak={final_peak:.3f} (threshold {self._final_warn_threshold:.2f}). "
+                        "Output callback clipping risk is high."
+                    )
+                    self._alert_state["final_peak_last"] = now_alert
+
+                processing_rate = self.downsample_rate if self.downsample_rate is not None else self.sampling_rate
+                mono_out = self._resample_to_playback_rate(mono_out, int(processing_rate))
+
+                if self.output_mode == "codec":
+                    self._send_codec_chunk(mono_out, int(processing_rate))
+                else:
+                    with self._output_fifo_lock:
+                        self._output_fifo.append(mono_out)
+                        self._output_buffered_samples += mono_out.size
+                        while self._output_buffered_samples > self._output_max_buffer_samples and len(self._output_fifo) > 0:
+                            old = self._output_fifo.popleft()
+                            self._output_buffered_samples -= old.size
+
             if self.sampling_rate != original_rate:
                 self.sampling_rate = original_rate
-                if hasattr(self.beamformer, "sample_rate") and original_bf_rate is not None:
-                    self.beamformer.sample_rate = int(original_bf_rate)
-                if doa_beamformer is not None and hasattr(doa_beamformer, "sample_rate") and original_doa_bf_rate is not None:
-                    doa_beamformer.sample_rate = int(original_doa_bf_rate)
+                if self.beamformer is not None and hasattr(self.beamformer, "sample_rate"):
+                    self.beamformer.sample_rate = int(original_rate)
+                doa_bf = getattr(self.doa_estimator, "beamformer", None)
+                if doa_bf is not None and hasattr(doa_bf, "sample_rate"):
+                    doa_bf.sample_rate = int(original_rate)
 
-            # Store results
             total_time = time.monotonic() - start_doa
             with self._lock:
                 self._latest_block = block
                 self._latest_per_mic = per_mic
                 self._latest_doa = doa_value
                 self._latest_beamformed = beamformed_value
-            
-            # Periodic performance report
+
             if block_count % 5 == 0:
                 elapsed_total = time.monotonic() - start_time
                 blocks_per_sec = block_count / elapsed_total
                 self.logger.debug(f"[Performance] Processed {block_count} blocks in {elapsed_total:.1f}s ({blocks_per_sec:.1f} blocks/sec), avg {total_time*1000:.0f}ms/block")
-        
+
         total_time = time.monotonic() - start_time
         self.logger.info(f"Processing thread stopped after {block_count} blocks in {total_time:.1f}s")
 
@@ -473,12 +528,11 @@ class Array_RealTime(Array):
         """
         Get the latest audio block received from the stream. This will return a copy of the data to ensure thread safety.
         """
-        
         with self._lock:
             if self._latest_block is None:
                 return None
             return self._latest_block.copy()
-        
+
     def get_latest_doa(self):
         """
         Get the latest DOA estimate. This will return a copy of the data to ensure thread safety.

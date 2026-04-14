@@ -8,11 +8,145 @@ from classes.AGC import AGC, TwoStageAGC, Amplifier, AdaptiveAmplifier, AGCChain
 from classes.Codec import G711Codec, OpusCodec
 
 import time
-import numpy as np
+import os
 from pathlib import Path
 import logging
+from contextlib import contextmanager
+import select
 
-import sounddevice as sd
+if os.name == "nt":
+    import msvcrt
+else:
+    import termios
+    import tty
+
+
+MODE_FULL = 0
+MODE_SINGLE = 1
+
+
+@contextmanager
+def _key_capture_mode():
+    """Enable non-blocking key capture on POSIX; no-op on Windows."""
+    if os.name != "nt" and os.isatty(0):
+        fd = 0
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setcbreak(fd)
+            yield
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+    else:
+        yield
+
+
+def _poll_mode_control_key() -> int | None:
+    """
+    Poll keyboard and return:
+    -1 for left arrow, +1 for right arrow, 99 for quit, None for no action.
+    """
+    if os.name == "nt":
+        if not msvcrt.kbhit():
+            return None
+        key = msvcrt.getch()
+        if key in (b"\x00", b"\xe0") and msvcrt.kbhit():
+            key2 = msvcrt.getch()
+            if key2 == b"K":
+                return -1
+            if key2 == b"M":
+                return 1
+            return None
+        if key in (b"q", b"Q"):
+            return 99
+        return None
+
+    if not os.isatty(0):
+        return None
+
+    ready, _, _ = select.select([0], [], [], 0)
+    if not ready:
+        return None
+
+    seq = os.read(0, 3)
+    if seq.startswith(b"\x1b[D"):
+        return -1
+    if seq.startswith(b"\x1b[C"):
+        return 1
+    if seq in (b"q", b"Q"):
+        return 99
+    return None
+
+
+def _build_mode_components(
+    *,
+    mode: int,
+    logger: logging.Logger,
+    sample_rate: int,
+    mic_positions,
+    agc,
+    filters,
+    codec,
+):
+    use_single_mic = mode == MODE_SINGLE
+    mic_channel_numbers = [0] if use_single_mic else [0, 1, 2, 3]
+    mic_list = [Microphone(logger=logger, channel_number=i, sampling_rate=sample_rate) for i in mic_channel_numbers]
+
+    if use_single_mic:
+        return {
+            "mic_list": mic_list,
+            "doa_estimator": None,
+            "beamformer": None,
+            "echo_canceller": EchoCanceller(logger=logger, sample_rate=sample_rate, channels=1),
+            "filters": filters,
+            "agc": agc,
+            "codec": codec,
+            "processing_input_channel": 0,
+            "mode_label": "SINGLE MIC",
+        }
+
+    das_beamformer = DASBeamformer(
+        logger=logger,
+        mic_channel_numbers=mic_channel_numbers,
+        sample_rate=sample_rate,
+        mic_positions_m=mic_positions,
+    )
+
+    mvdr_beamformer = MVDRBeamformer(
+        logger=logger,
+        mic_channel_numbers=mic_channel_numbers,
+        sample_rate=sample_rate,
+        mic_positions_m=mic_positions,
+        covariance_alpha=0.95,
+        diagonal_loading=0.15,
+        spectral_whitening_factor=0.12,
+        weight_smooth_alpha=0.72,
+        max_adaptive_loading_scale=4.0,
+        coherence_suppression_strength=0.8,
+        weight_smooth_alpha_min=0.45,
+        weight_smooth_alpha_max=0.82,
+        snr_threshold_for_sharpening=2.0,
+    )
+
+    doa_estimator = IterativeDOAEstimator(
+        logger=logger,
+        update_rate=3.0,
+        angle_range=(-25, 25),
+        beamformer=das_beamformer,
+        scan_step_deg=5.0,
+    )
+    doa_estimator.freeze(0.0)
+
+    return {
+        "mic_list": mic_list,
+        "doa_estimator": doa_estimator,
+        "beamformer": mvdr_beamformer,
+        "echo_canceller": EchoCanceller(logger=logger, sample_rate=sample_rate, channels=4),
+        "filters": filters,
+        "agc": agc,
+        "codec": codec,
+        "processing_input_channel": 0,
+        "mode_label": "FULL PIPELINE",
+    }
 
 
 if __name__ == "__main__":
@@ -22,6 +156,7 @@ if __name__ == "__main__":
     monitor_gain = 0.22
     
     mic_channel_numbers = [0, 1, 2, 3]
+    blocksize = 960
     
     logger = logging.getLogger("MicArrayTest")
     logger.setLevel(logging.INFO)
@@ -33,50 +168,8 @@ if __name__ == "__main__":
     logger.addHandler(console_handler)
 
     
-    mic_list = [Microphone(logger=logger, channel_number=i, sampling_rate=sample_rate) for i in mic_channel_numbers]
     geometry_path = script_dir / "array_geometries" / "1_square.xml"
     mic_positions = MVDRBeamformer.load_positions_from_xml(str(geometry_path))
-    
-    # DAS for DOA estimation (faster than MVDR)
-    das_beamformer = DASBeamformer(
-        logger=logger,
-        mic_channel_numbers=mic_channel_numbers,
-        sample_rate=sample_rate,
-        mic_positions_m=mic_positions,
-    )
-    
-    # MVDR for main beamforming (higher quality than DAS)
-    mvdr_beamformer = MVDRBeamformer(
-        logger=logger,
-        mic_channel_numbers=mic_channel_numbers,
-        sample_rate=sample_rate,
-        mic_positions_m=mic_positions,                                           
-        covariance_alpha=0.95,             # Controls how quickly the covariance matrix adapts to new data
-        diagonal_loading=0.15,             # Higher regularization suppresses off-axis interference
-                                           # Trade-off: reduces directional response slightly but cuts side voices
-        spectral_whitening_factor=0.12,    # Keeps main lobe energy while suppressing diffuse noise
-        weight_smooth_alpha=0.72,          # Baseline smoothing (will adapt based on SNR)
-        max_adaptive_loading_scale=4.0,    # Prevents extreme gain at low-SNR frequencies
-        coherence_suppression_strength=0.8,  # Suppress diffuse noise via coherence-based weighting (0-1)
-                                            # 0.0 = pure MVDR, 0.6 = balanced, 1.0 = aggressive room noise rejection
-        weight_smooth_alpha_min=0.45,      # NEW: Sharp main lobe during steady-state (high-SNR speech)
-        weight_smooth_alpha_max=0.82,      # NEW: Stable weights in noisy conditions (low-SNR)
-        snr_threshold_for_sharpening=2.0,  # NEW: SNR above this triggers sharpening (lower smoothing)
-    )
-
-
-    beamformer_choice = mvdr_beamformer
-    
-    doa_estimator = IterativeDOAEstimator(
-        logger=logger,
-        update_rate=3.0,
-        angle_range=(-25, 25),
-        beamformer=das_beamformer,  # Use DAS for fast DOA scanning
-        scan_step_deg=5.0,
-    )
-    doa_estimator.freeze(0.0)
-    
-    echo_canceller = EchoCanceller(logger=logger, sample_rate=sample_rate, channels=4)
     
     # Passband to eliminate low-frequency rumble and high-frequency hiss
     # Spectral Subtraction to supress background noise in voice region
@@ -142,18 +235,29 @@ if __name__ == "__main__":
         # In local mode, use a lightweight codec object; codec transport is not used.
         codec = G711Codec(logger=logger)
 
+    mode = MODE_FULL
+    mode_cfg = _build_mode_components(
+        mode=mode,
+        logger=logger,
+        sample_rate=sample_rate,
+        mic_positions=mic_positions,
+        agc=agc,
+        filters=filters,
+        codec=codec,
+    )
+
     array = Array_RealTime(
         id_vendor=0x2752,
         id_product=0x0019,
         logger=logger,
-        mic_list=mic_list,
+        mic_list=mode_cfg["mic_list"],
         sampling_rate=sample_rate,
-        doa_estimator=doa_estimator,
-        beamformer=beamformer_choice,
-        echo_canceller=echo_canceller,
-        filters=filters,
-        agc=agc,
-        codec=codec,
+        doa_estimator=mode_cfg["doa_estimator"],
+        beamformer=mode_cfg["beamformer"],
+        echo_canceller=mode_cfg["echo_canceller"],
+        filters=mode_cfg["filters"],
+        agc=mode_cfg["agc"],
+        codec=mode_cfg["codec"],
         monitor_gain=monitor_gain,
         output_mode=output_mode,
         output_boundary_fade_ms=0.0,
@@ -161,13 +265,56 @@ if __name__ == "__main__":
         initial_silence_duration=2.0,  # Silence period for baseline learning (filter protects against corruption during onset)
     )
 
-    array.start_realtime(blocksize=960)
+    array.start_realtime(blocksize=blocksize)
     array.start_output_monitoring()
 
     try:
-        print("Realtime beamformed monitoring started. Press Ctrl+C to stop.")
-        while True:
-            time.sleep(0.1)
+        print("Realtime monitoring started.")
+        print("Right arrow: switch to SINGLE MIC, Left arrow: switch to FULL PIPELINE, q: quit")
+        with _key_capture_mode():
+            while True:
+                action = _poll_mode_control_key()
+                if action is None:
+                    time.sleep(0.05)
+                    continue
+
+                if action == 99:
+                    print("Quit requested from keyboard.")
+                    break
+
+                target_mode = mode
+                if action == 1:
+                    target_mode = MODE_SINGLE
+                elif action == -1:
+                    target_mode = MODE_FULL
+
+                if target_mode == mode:
+                    continue
+
+                mode_cfg = _build_mode_components(
+                    mode=target_mode,
+                    logger=logger,
+                    sample_rate=sample_rate,
+                    mic_positions=mic_positions,
+                    agc=agc,
+                    filters=filters,
+                    codec=codec,
+                )
+
+                print(f"Switching mode: {mode_cfg['mode_label']}")
+                array.reconfigure_runtime(
+                    mic_list=mode_cfg["mic_list"],
+                    doa_estimator=mode_cfg["doa_estimator"],
+                    beamformer=mode_cfg["beamformer"],
+                    echo_canceller=mode_cfg["echo_canceller"],
+                    filters=mode_cfg["filters"],
+                    agc=mode_cfg["agc"],
+                    processing_input_channel=mode_cfg["processing_input_channel"],
+                    restart_if_running=True,
+                    blocksize=blocksize,
+                    restore_output_monitoring=True,
+                )
+                mode = target_mode
 
     except KeyboardInterrupt:
         print("\nStopping...")
