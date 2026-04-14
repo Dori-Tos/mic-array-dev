@@ -54,6 +54,8 @@ def test_polar_pattern(
     alternate_rotation_direction=True,
     freeze_beamformer=True,
     freeze_angle_deg=0.0,
+    enable_agc=False,
+    enable_spectral_filter=True,
     save_on_interrupt=False,
 ):
     """
@@ -87,6 +89,9 @@ def test_polar_pattern(
                          If False, keep the same rotation_direction for all passes.
         freeze_beamformer: If True, keep steering fixed to freeze_angle_deg for all measurements
         freeze_angle_deg: Steering angle used when freeze_beamformer is enabled
+        enable_agc: If True, enable both AGC stages (AdaptiveAmplifier + PedalboardAGC).
+                Default False for linear directivity measurements.
+        enable_spectral_filter: If True, enable SpectralSubtractionFilter (default True).
         save_on_interrupt: If True, save partial data when interrupted by Ctrl+C.
                   Default False to avoid saving incomplete measurements.
     
@@ -141,7 +146,11 @@ def test_polar_pattern(
     print(f"  Total test duration: ~{num_passes * resolution * interval / 60:.1f} minutes")
     print(f"  Output directory: {output_path}")
     if use_pipeline:
-        print(f"  Processing: Full pipeline (MVDR Beamformer + BandPass + SpectralSubtraction + AGC)")
+        print(f"  Processing: Full pipeline")
+        print(f"    - Beamformer: MVDR")
+        print(f"    - BandPass filter: ON")
+        print(f"    - Spectral subtraction: {'ON' if enable_spectral_filter else 'OFF'}")
+        print(f"    - AGC chain (both stages): {'ON' if enable_agc else 'OFF'}")
         print(f"  Beamformer freeze: {'ON' if freeze_beamformer else 'OFF'}")
         if freeze_beamformer:
             print(f"  Beamformer freeze angle: {float(freeze_angle_deg):.1f}°")
@@ -217,45 +226,52 @@ def test_polar_pattern(
                 high_cutoff=4000.0,
                 order=4
             ),
-            SpectralSubtractionFilter(
-                logger=logger,
-                sample_rate=sample_rate,
-                noise_factor=0.65,
-                gain_floor=0.55,  # Updated from 0.35 (prevents over-suppression of low freqs)
-                noise_alpha=0.995,
-                noise_update_snr_db=8.0,
-                gain_smooth_alpha=0.92,
-            ),
         ]
+
+        if enable_spectral_filter:
+            filters.append(
+                SpectralSubtractionFilter(
+                    logger=logger,
+                    sample_rate=sample_rate,
+                    noise_factor=0.65,
+                    gain_floor=0.55,  # Updated from 0.35 (prevents over-suppression of low freqs)
+                    noise_alpha=0.995,
+                    noise_update_snr_db=8.0,
+                    gain_smooth_alpha=0.92,
+                )
+            )
         
         # AGC chain (same config as test_pipeline.py)
-        agc = AGCChain(logger=logger, stages=[
-            AdaptiveAmplifier(
-                logger=logger,
-                target_rms=0.08,
-                min_gain=1.0,
-                max_gain=6.0,  # Updated from 12.0 (prevent oscillation)
-                adapt_alpha=0.04,
-                speech_activity_rms=0.00012,
-                silence_decay_alpha=0.008,
-                activity_hold_ms=600.0,
-                peak_protect_threshold=0.30,  # Updated from 0.35
-                peak_protect_strength=1.0,  # Updated from 0.85 (maximum protection)
-                max_gain_warn_rms_min=0.001,
-            ),
-            PedalboardAGC(
-                logger=logger,
-                sample_rate=sample_rate,
-                threshold_db=-20.0,
-                ratio=2.0,  # Updated from 3.5 (gentler compression)
-                attack_ms=3.0,
-                release_ms=140.0,
-                limiter_threshold_db=-7.0,  # Updated from -1.4 (much lower headroom)
-                limiter_release_ms=50.0  # Updated from 100.0
-            ),
-        ])
+        if enable_agc:
+            agc = AGCChain(logger=logger, stages=[
+                AdaptiveAmplifier(
+                    logger=logger,
+                    target_rms=0.08,
+                    min_gain=1.0,
+                    max_gain=6.0,  # Updated from 12.0 (prevent oscillation)
+                    adapt_alpha=0.04,
+                    speech_activity_rms=0.00012,
+                    silence_decay_alpha=0.008,
+                    activity_hold_ms=600.0,
+                    peak_protect_threshold=0.30,  # Updated from 0.35
+                    peak_protect_strength=1.0,  # Updated from 0.85 (maximum protection)
+                    max_gain_warn_rms_min=0.001,
+                ),
+                PedalboardAGC(
+                    logger=logger,
+                    sample_rate=sample_rate,
+                    threshold_db=-20.0,
+                    ratio=2.0,  # Updated from 3.5 (gentler compression)
+                    attack_ms=3.0,
+                    release_ms=140.0,
+                    limiter_threshold_db=-7.0,  # Updated from -1.4 (much lower headroom)
+                    limiter_release_ms=50.0  # Updated from 100.0
+                ),
+            ])
+        else:
+            agc = None
         
-        print("Pipeline initialized (Beamformer + Filters + AGC).\n")
+        print("Pipeline initialized.\n")
     else:
         beamformer = None
         filters = []
@@ -572,6 +588,10 @@ if __name__ == '__main__':
                         help='Freeze beamformer steering during the full measurement run (default: enabled)')
     parser.add_argument('--freeze-angle', type=float, default=0.0,
                         help='Steering angle used when beamformer freeze is enabled (default: 0.0)')
+    parser.add_argument('--enable-agc', action=argparse.BooleanOptionalAction, default=False,
+                        help='Enable both AGC stages (AdaptiveAmplifier + PedalboardAGC) (default: disabled)')
+    parser.add_argument('--enable-spectral-filter', action=argparse.BooleanOptionalAction, default=True,
+                        help='Enable spectral subtraction filter (default: enabled)')
     parser.add_argument('--save-on-interrupt', action=argparse.BooleanOptionalAction, default=False,
                         help='Save partial data when interrupted by Ctrl+C (default: disabled)')
     
@@ -611,6 +631,8 @@ if __name__ == '__main__':
         alternate_rotation_direction=args.alternate_rotation_direction,
         freeze_beamformer=args.freeze_beamformer,
         freeze_angle_deg=args.freeze_angle,
+        enable_agc=args.enable_agc,
+        enable_spectral_filter=args.enable_spectral_filter,
         save_on_interrupt=args.save_on_interrupt,
     )
     

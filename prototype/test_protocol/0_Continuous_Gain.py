@@ -57,6 +57,8 @@ def test_continuous_gain(
 	output_dir='data/test_protocol/continuous_gain',
 	freeze_beamformer=True,
 	freeze_angle_deg=0.0,
+	enable_agc=False,
+	enable_spectral_filter=True,
 	use_pipeline=True,
 ):
 	"""
@@ -71,6 +73,8 @@ def test_continuous_gain(
 		output_dir: Directory to save CSV result.
 		freeze_beamformer: Keep steering fixed while testing.
 		freeze_angle_deg: Steering angle for freeze mode.
+		enable_agc: If True, enable both AGC stages (default: False).
+		enable_spectral_filter: If True, enable spectral subtraction (default: True).
 		use_pipeline: Apply the same chain as protocol 1 (default True).
 	"""
 	output_path = Path(output_dir)
@@ -97,6 +101,9 @@ def test_continuous_gain(
 	print(f"  Update interval: {update_interval:.2f} s")
 	print(f"  Baseline samples: {baseline_samples}")
 	print(f"  Processing: {'FULL PIPELINE' if use_pipeline else 'RAW ONLY'}")
+	if use_pipeline:
+		print(f"    - Spectral subtraction: {'ON' if enable_spectral_filter else 'OFF'}")
+		print(f"    - AGC chain (both stages): {'ON' if enable_agc else 'OFF'}")
 	print(f"  Freeze beamformer: {'ON' if freeze_beamformer else 'OFF'}")
 	if freeze_beamformer:
 		print(f"  Freeze angle: {float(freeze_angle_deg):.1f} deg")
@@ -134,42 +141,49 @@ def test_continuous_gain(
 				high_cutoff=4000.0,
 				order=4,
 			),
-			SpectralSubtractionFilter(
-				logger=logger,
-				sample_rate=sample_rate,
-				noise_factor=0.65,
-				gain_floor=0.55,
-				noise_alpha=0.995,
-				noise_update_snr_db=8.0,
-				gain_smooth_alpha=0.92,
-			),
 		]
 
-		agc = AGCChain(logger=logger, stages=[
-			AdaptiveAmplifier(
-				logger=logger,
-				target_rms=0.08,
-				min_gain=1.0,
-				max_gain=6.0,
-				adapt_alpha=0.04,
-				speech_activity_rms=0.00012,
-				silence_decay_alpha=0.008,
-				activity_hold_ms=600.0,
-				peak_protect_threshold=0.30,
-				peak_protect_strength=1.0,
-				max_gain_warn_rms_min=0.001,
-			),
-			PedalboardAGC(
-				logger=logger,
-				sample_rate=sample_rate,
-				threshold_db=-20.0,
-				ratio=2.0,
-				attack_ms=3.0,
-				release_ms=140.0,
-				limiter_threshold_db=-7.0,
-				limiter_release_ms=50.0,
-			),
-		])
+		if enable_spectral_filter:
+			filters.append(
+				SpectralSubtractionFilter(
+					logger=logger,
+					sample_rate=sample_rate,
+					noise_factor=0.65,
+					gain_floor=0.55,
+					noise_alpha=0.995,
+					noise_update_snr_db=8.0,
+					gain_smooth_alpha=0.92,
+				)
+			)
+
+		if enable_agc:
+			agc = AGCChain(logger=logger, stages=[
+				AdaptiveAmplifier(
+					logger=logger,
+					target_rms=0.08,
+					min_gain=1.0,
+					max_gain=6.0,
+					adapt_alpha=0.04,
+					speech_activity_rms=0.00012,
+					silence_decay_alpha=0.008,
+					activity_hold_ms=600.0,
+					peak_protect_threshold=0.30,
+					peak_protect_strength=1.0,
+					max_gain_warn_rms_min=0.001,
+				),
+				PedalboardAGC(
+					logger=logger,
+					sample_rate=sample_rate,
+					threshold_db=-20.0,
+					ratio=2.0,
+					attack_ms=3.0,
+					release_ms=140.0,
+					limiter_threshold_db=-7.0,
+					limiter_release_ms=50.0,
+				),
+			])
+		else:
+			agc = None
 	else:
 		beamformer = None
 		filters = []
@@ -364,6 +378,10 @@ if __name__ == '__main__':
 						help='Freeze beamformer steering during the test (default: enabled)')
 	parser.add_argument('--freeze-angle', type=float, default=0.0,
 						help='Steering angle used when beamformer freeze is enabled (default: 0.0)')
+	parser.add_argument('--enable-agc', action=argparse.BooleanOptionalAction, default=False,
+						help='Enable both AGC stages (AdaptiveAmplifier + PedalboardAGC) (default: disabled)')
+	parser.add_argument('--enable-spectral-filter', action=argparse.BooleanOptionalAction, default=True,
+						help='Enable spectral subtraction filter (default: enabled)')
 	parser.add_argument('--no-pipeline', action='store_true',
 						help='Disable processing pipeline and monitor raw channel only')
 	parser.add_argument('--list-devices', action='store_true',
@@ -391,6 +409,8 @@ if __name__ == '__main__':
 		output_dir=args.output,
 		freeze_beamformer=args.freeze_beamformer,
 		freeze_angle_deg=args.freeze_angle,
+		enable_agc=args.enable_agc,
+		enable_spectral_filter=args.enable_spectral_filter,
 		use_pipeline=not args.no_pipeline,
 	)
 
