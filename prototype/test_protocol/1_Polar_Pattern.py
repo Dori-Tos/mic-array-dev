@@ -50,6 +50,7 @@ def test_polar_pattern(
     use_pipeline=True,
     wait_between_passes=False,
     quarter_rotation=False,
+    edge_padding_points=2,
     alternate_rotation_direction=True,
     freeze_beamformer=True,
     freeze_angle_deg=0.0,
@@ -79,6 +80,9 @@ def test_polar_pattern(
         wait_between_passes: If True, wait for Enter key before starting next pass
         quarter_rotation: If True, measure only front 90° instead of full 360° (faster)
                          Useful for measuring front directivity and mirroring afterwards
+        edge_padding_points: Number of extra measurements before 0° and after limit (e.g., 2).
+                    These edge captures stabilize boundary bins; final averaged output keeps
+                    only the in-range window [0..total_degrees].
         alternate_rotation_direction: If True, alternate direction each pass.
                          If False, keep the same rotation_direction for all passes.
         freeze_beamformer: If True, keep steering fixed to freeze_angle_deg for all measurements
@@ -99,6 +103,10 @@ def test_polar_pattern(
     degrees_per_measurement = total_degrees / resolution
     interval = seconds_per_rotation * (degrees_per_measurement / 360)  # Time per measurement point
     pass_duration = seconds_per_rotation * (total_degrees / 360.0)
+    edge_padding_points = int(max(0, edge_padding_points))
+    padded_resolution = resolution + (2 * edge_padding_points)
+    speed_deg_per_sec = 360.0 / max(seconds_per_rotation, 1e-9)
+    pass_duration_padded = pass_duration + (2.0 * edge_padding_points * interval)
     
     # Get device info
     if device_index is None:
@@ -123,6 +131,7 @@ def test_polar_pattern(
     print(f"  Number of passes: {num_passes}")
     print(f"  Measurement range: {total_degrees}° {f'(FRONT ONLY - will be mirrored)' if quarter_rotation else '(FULL CIRCLE)'}")
     print(f"  Resolution: {resolution} points ({degrees_per_measurement:.1f}° per measurement)")
+    print(f"  Edge padding points: {edge_padding_points} (effective captures/pass: {padded_resolution})")
     print(f"  Turntable speed: {seconds_per_rotation} seconds/full rotation (adjusted for {total_degrees}° range)")
     print(f"  Measurement interval: {interval:.2f} seconds")
     print(f"  Sample duration: {sample_duration} seconds")
@@ -146,12 +155,21 @@ def test_polar_pattern(
             " Requested rotation cadence cannot be reached with blocking captures;"
             " effective spacing will be >= sample_duration + processing time."
         )
-    theoretical_max_points = int(max(1, np.floor(pass_duration / max(sample_duration, 1e-6))))
-    if theoretical_max_points < resolution:
+    theoretical_max_points = int(max(1, np.floor(pass_duration_padded / max(sample_duration, 1e-6))))
+    if theoretical_max_points < padded_resolution:
         print(
-            f"  WARNING: Requested resolution ({resolution}) is higher than time budget allows "
+            f"  WARNING: Requested captures ({padded_resolution}) are higher than time budget allows "
             f"for this pass duration/sample duration (theoretical max ~{theoretical_max_points} before processing overhead)."
         )
+    if edge_padding_points > 0:
+        pre_rel = [-(k * degrees_per_measurement) for k in range(edge_padding_points, 0, -1)]
+        post_rel = [total_degrees + (k * degrees_per_measurement) for k in range(1, edge_padding_points + 1)]
+        pre_abs = [((reference_angle + a) % 360.0) for a in pre_rel]
+        post_abs = [((reference_angle + a) % 360.0) for a in post_rel]
+        print(f"  Edge pre-window angles (relative): {[round(v, 2) for v in pre_rel]}")
+        print(f"  Edge pre-window angles (absolute): {[round(v, 2) for v in pre_abs]}")
+        print(f"  Edge post-window angles (relative): {[round(v, 2) for v in post_rel]}")
+        print(f"  Edge post-window angles (absolute): {[round(v, 2) for v in post_abs]}")
     print(f"{'='*70}\n")
     
     # Setup logging
@@ -307,13 +325,13 @@ def test_polar_pattern(
                 print()
 
             # Time-based synchronization: angle is derived from real elapsed time,
-            # so reported angle stays aligned to physical rotation.
+            # with edge-padding captures before/after the in-range window.
             pass_start_time = time.time()
-            pass_end_time = pass_start_time + pass_duration
+            pass_end_time = pass_start_time + pass_duration_padded
             next_measurement_time = pass_start_time
             meas_idx = 0
 
-            while meas_idx < resolution:
+            while meas_idx < padded_resolution:
                 now = time.time()
                 if now >= pass_end_time:
                     break
@@ -325,13 +343,13 @@ def test_polar_pattern(
 
                 # Preview angle (for logging/errors) based on current elapsed time.
                 now_for_angle = time.time()
-                elapsed_preview = np.clip(now_for_angle - pass_start_time, 0.0, pass_duration)
-                progress_preview = elapsed_preview / pass_duration if pass_duration > 0 else 0.0
+                elapsed_preview = np.clip(now_for_angle - pass_start_time, 0.0, pass_duration_padded)
+                logical_ccw_preview = (-edge_padding_points * degrees_per_measurement) + (elapsed_preview * speed_deg_per_sec)
                 if pass_rotation_direction == 'counterclockwise':
-                    angle_offset_preview = progress_preview * total_degrees
+                    relative_angle_preview = logical_ccw_preview
                 else:
-                    angle_offset_preview = total_degrees - (progress_preview * total_degrees)
-                expected_angle_preview = (reference_angle + angle_offset_preview) % 360
+                    relative_angle_preview = total_degrees - logical_ccw_preview
+                expected_angle_preview = (reference_angle + relative_angle_preview) % 360
                 
                 # Record audio sample (4-channel for beamforming)
                 try:
@@ -375,20 +393,20 @@ def test_polar_pattern(
                 # Compute expected angle from elapsed real time at the CENTER of the capture window.
                 # This keeps angle labels synchronized with turntable motion even under load.
                 capture_mid_time = time.time() - (sample_duration * 0.5)
-                elapsed = np.clip(capture_mid_time - pass_start_time, 0.0, pass_duration)
-                progress = elapsed / pass_duration if pass_duration > 0 else 0.0
+                elapsed = np.clip(capture_mid_time - pass_start_time, 0.0, pass_duration_padded)
+                logical_ccw = (-edge_padding_points * degrees_per_measurement) + (elapsed * speed_deg_per_sec)
                 if pass_rotation_direction == 'counterclockwise':
-                    angle_offset = progress * total_degrees
+                    relative_angle = logical_ccw
                 else:
-                    angle_offset = total_degrees - (progress * total_degrees)
-                expected_angle = (reference_angle + angle_offset) % 360
+                    relative_angle = total_degrees - logical_ccw
+                expected_angle = (reference_angle + relative_angle) % 360
                 
                 # Store measurement
                 measurement = {
                     'measurement_index': len(all_measurements),
                     'pass_number': pass_num + 1,
                     'expected_angle': expected_angle,
-                    'relative_angle': expected_angle,  # Same as expected_angle for single mic
+                    'relative_angle': relative_angle,
                     'timestamp': datetime.now().isoformat(),
                     'reference_angle': reference_angle,
                     'rms_level': rms_level,
@@ -398,18 +416,18 @@ def test_polar_pattern(
                 all_measurements.append(measurement)
                 
                 # Progress indicator for every measurement so the cadence matches the resolution.
-                print(f"  Pass {pass_num + 1}, Measurement {meas_idx + 1}/{resolution}: "
-                        f"Angle: {expected_angle:6.1f}° | RMS: {20*np.log10(max(rms_level, 1e-10)):7.2f} dB | "
+                print(f"  Pass {pass_num + 1}, Measurement {meas_idx + 1}/{padded_resolution}: "
+                    f"Angle: {expected_angle:6.1f}° (rel {relative_angle:6.1f}°) | RMS: {20*np.log10(max(rms_level, 1e-10)):7.2f} dB | "
                         f"Peak: {20*np.log10(max(peak_level, 1e-10)):7.2f} dB")
 
                 # Schedule next measurement from absolute timeline, not loop execution time.
                 next_measurement_time += interval
                 meas_idx += 1
 
-            if meas_idx < resolution:
+            if meas_idx < padded_resolution:
                 print(
-                    f"  Pass {pass_num + 1}: captured {meas_idx}/{resolution} samples before rotation window ended "
-                    f"({pass_duration:.2f}s)."
+                    f"  Pass {pass_num + 1}: captured {meas_idx}/{padded_resolution} samples before padded rotation window ended "
+                    f"({pass_duration_padded:.2f}s)."
                 )
         
     except KeyboardInterrupt:
@@ -440,17 +458,23 @@ def test_polar_pattern(
     # Calculate averaged results by angle
     print("Averaging measurements across passes...")
 
-    # IMPORTANT: expected_angle is time-derived float, so values differ slightly across passes.
-    # Bin to the intended angular grid before averaging to avoid sawtooth high/low alternation.
-    rel_angle = (df_all['expected_angle'] - reference_angle) % 360.0
+    # Keep only in-range window for final averaged output; edge-padding samples are for stabilization.
+    df_avg = df_all[(df_all['relative_angle'] >= 0.0) & (df_all['relative_angle'] <= total_degrees)].copy()
+    if df_avg.empty:
+        print("No in-range samples collected after filtering edge-padding points.")
+        return None
+
+    # relative_angle is time-derived float, so values differ slightly across passes.
+    # Bin to intended grid before averaging to avoid sawtooth high/low alternation.
+    rel_angle = df_avg['relative_angle']
     bin_idx = np.floor((rel_angle + (degrees_per_measurement * 0.5)) / degrees_per_measurement).astype(int)
     bin_idx = np.clip(bin_idx, 0, resolution - 1)
-    df_all['angle_bin'] = bin_idx
-    df_all['expected_angle_binned'] = (reference_angle + df_all['angle_bin'] * degrees_per_measurement) % 360.0
-    df_all['relative_angle_binned'] = df_all['expected_angle_binned']
+    df_avg['angle_bin'] = bin_idx
+    df_avg['expected_angle_binned'] = (reference_angle + df_avg['angle_bin'] * degrees_per_measurement) % 360.0
+    df_avg['relative_angle_binned'] = df_avg['angle_bin'] * degrees_per_measurement
     
     # Group by binned angles and calculate mean for numeric columns
-    grouped = df_all.groupby(['angle_bin', 'expected_angle_binned', 'relative_angle_binned'], as_index=False).agg({
+    grouped = df_avg.groupby(['angle_bin', 'expected_angle_binned', 'relative_angle_binned'], as_index=False).agg({
         'rms_level': 'mean',
         'rms_dbfs': 'mean',
         'peak_level': 'mean',
@@ -536,6 +560,8 @@ if __name__ == '__main__':
                         help='Wait for Enter key before starting each new pass')
     parser.add_argument('--quarter-rotation', action='store_true',
                         help='Measure only front 90° instead of full 360° (useful for measuring front directivity and mirroring afterwards)')
+    parser.add_argument('--edge-padding-points', type=int, default=2,
+                        help='Extra measurements before 0° and after the rotation limit (default: 2)')
     parser.add_argument('--alternate-rotation-direction', action=argparse.BooleanOptionalAction, default=False,
                         help='Alternate rotation direction at each pass (default: disabled)')
     parser.add_argument('--freeze-beamformer', action=argparse.BooleanOptionalAction, default=True,
@@ -577,6 +603,7 @@ if __name__ == '__main__':
         use_pipeline=not args.no_pipeline,
         wait_between_passes=args.wait_between_passes,
         quarter_rotation=args.quarter_rotation,
+        edge_padding_points=args.edge_padding_points,
         alternate_rotation_direction=args.alternate_rotation_direction,
         freeze_beamformer=args.freeze_beamformer,
         freeze_angle_deg=args.freeze_angle,
