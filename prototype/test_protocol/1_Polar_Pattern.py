@@ -458,17 +458,21 @@ def test_polar_pattern(
     # Calculate averaged results by angle
     print("Averaging measurements across passes...")
 
-    # Keep only in-range window for final averaged output; edge-padding samples are for stabilization.
-    df_avg = df_all[(df_all['relative_angle'] >= 0.0) & (df_all['relative_angle'] <= total_degrees)].copy()
+    # Keep in-range window plus half-bin overscan so slight post-limit samples
+    # can contribute to the endpoint bin (e.g., 90°) and avoid abrupt cutoff.
+    lower_bound = -0.5 * degrees_per_measurement
+    upper_bound = total_degrees + (0.5 * degrees_per_measurement)
+    df_avg = df_all[(df_all['relative_angle'] >= lower_bound) & (df_all['relative_angle'] <= upper_bound)].copy()
     if df_avg.empty:
         print("No in-range samples collected after filtering edge-padding points.")
         return None
 
     # relative_angle is time-derived float, so values differ slightly across passes.
     # Bin to intended grid before averaging to avoid sawtooth high/low alternation.
+    # Use an extra endpoint bin so the upper-limit angle (e.g., 90°) is explicitly represented.
     rel_angle = df_avg['relative_angle']
     bin_idx = np.floor((rel_angle + (degrees_per_measurement * 0.5)) / degrees_per_measurement).astype(int)
-    bin_idx = np.clip(bin_idx, 0, resolution - 1)
+    bin_idx = np.clip(bin_idx, 0, resolution)
     df_avg['angle_bin'] = bin_idx
     df_avg['expected_angle_binned'] = (reference_angle + df_avg['angle_bin'] * degrees_per_measurement) % 360.0
     df_avg['relative_angle_binned'] = df_avg['angle_bin'] * degrees_per_measurement

@@ -67,6 +67,10 @@ def plot_directivity(
         # Avoid duplicate points at 0° and 180° when mirroring.
         mirrored = mirrored[~np.isclose(mirrored[angle_column], df[angle_column])]
         df = pd.concat([df, mirrored], ignore_index=True)
+        # Convert to a continuous front-hemisphere angle domain to avoid wrap gaps at 0°.
+        # Example: 350° -> -10°, 270° -> -90°, 0..90° unchanged.
+        df[angle_column] = ((df[angle_column] + 180.0) % 360.0) - 180.0
+        df = df[(df[angle_column] >= -90.0) & (df[angle_column] <= 90.0)]
         df = df.sort_values(angle_column).reset_index(drop=True)
     
     # Check for peaks - ReSpeaker uses 'peaks' column
