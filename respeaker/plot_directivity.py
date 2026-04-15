@@ -5,7 +5,7 @@ from pathlib import Path
 import argparse
 
 
-def plot_directivity(csv_file, save_plot=True, save_location=None, reference_max_rms=None, min_scale=None):
+def plot_directivity(csv_file, save_plot=True, save_location=None, reference_max_rms=None, min_scale=None, flip_axis=False):
     """
     Plot directivity pattern from measurement data.
     
@@ -19,6 +19,7 @@ def plot_directivity(csv_file, save_plot=True, save_location=None, reference_max
         min_scale: Optional minimum dB value for graph scaling (e.g., -30 for -30 dB floor).
                    If provided, all plots will use this as the minimum y-axis value.
                    If None, y-axis uses autoscaling based on data.
+        flip_axis: If True, flip the polar axis vertically so 0° points downward (default: False, 0° points upward).
     """
     # Load data
     df = pd.read_csv(csv_file)
@@ -58,6 +59,10 @@ def plot_directivity(csv_file, save_plot=True, save_location=None, reference_max
     ref_dbv = 20 * np.log10(ref_rms)
     reference_info = f"\nReference ({ref_source}): {ref_rms:.6f} RMS ({ref_dbv:.1f} dB)"
     
+    # Determine theta zero location and direction based on flip_axis
+    theta_zero_loc = 'S' if flip_axis else 'N'
+    theta_dir = 1 if flip_axis else -1
+    
     # Use multi-plot layout only for ReSpeaker with peaks
     if peaks_available and has_doa_angle:
         print("Peak measurements detected in data. Plotting both RMS and Peak levels.")
@@ -74,8 +79,8 @@ def plot_directivity(csv_file, save_plot=True, save_location=None, reference_max
         angles_rad = np.deg2rad(angles_closed)
         
         ax1.plot(angles_rad, rms_closed, 'b-o', linewidth=2, markersize=4, label='RMS')
-        ax1.set_theta_zero_location('N')
-        ax1.set_theta_direction(-1)
+        ax1.set_theta_zero_location(theta_zero_loc)
+        ax1.set_theta_direction(theta_dir)
         ax1.set_title('RMS Level (dBFS)', pad=20, fontsize=12, fontweight='bold')
         ax1.grid(True)
         ax1.legend(loc='upper right')
@@ -89,8 +94,8 @@ def plot_directivity(csv_file, save_plot=True, save_location=None, reference_max
         peak_closed = np.append(df['peak_dbfs'].values, df['peak_dbfs'].iloc[0])
         
         ax2.plot(angles_rad, peak_closed, 'r-s', linewidth=2, markersize=4, label='Peak')
-        ax2.set_theta_zero_location('N')
-        ax2.set_theta_direction(-1)
+        ax2.set_theta_zero_location(theta_zero_loc)
+        ax2.set_theta_direction(theta_dir)
         ax2.set_title('Peak Level (dBFS)', pad=20, fontsize=12, fontweight='bold')
         ax2.grid(True)
         ax2.legend(loc='upper right')
@@ -177,8 +182,8 @@ def plot_directivity(csv_file, save_plot=True, save_location=None, reference_max
         angles_rad = np.deg2rad(angles_closed)
         
         ax1.plot(angles_rad, rms_closed, 'b-o', linewidth=2, markersize=4)
-        ax1.set_theta_zero_location('N')
-        ax1.set_theta_direction(-1)
+        ax1.set_theta_zero_location(theta_zero_loc)
+        ax1.set_theta_direction(theta_dir)
         title = 'RMS Level (dBFS)'
         if use_relative_angle:
             title += ' - Relative to Locked DOA'
@@ -247,10 +252,12 @@ if __name__ == '__main__':
                         help='External reference max RMS value for normalizing dB (allows comparing multiple measurements)')
     parser.add_argument('--min-scale', type=float, default=None,
                         help='Minimum dB value for y-axis scaling (e.g., -30 for -30 dB floor). Allows consistent comparison between plots.')
+    parser.add_argument('--flip-axis', action='store_true',
+                        help='Flip the polar axis vertically so 0° points downward instead of upward (default: 0° points upward)')
     
     args = parser.parse_args()
     
-    plot_directivity(args.csv_file, save_plot=not args.no_save, save_location=args.save_location, reference_max_rms=args.reference_max_rms, min_scale=args.min_scale)
+    plot_directivity(args.csv_file, save_plot=not args.no_save, save_location=args.save_location, reference_max_rms=args.reference_max_rms, min_scale=args.min_scale, flip_axis=args.flip_axis)
 
     
     # Example:
@@ -262,3 +269,6 @@ if __name__ == '__main__':
     #
     # To set a fixed minimum dB scale (e.g., -30 dB) for consistent comparison:
     # .venv\Scripts\python.exe .\Python\Tests\mic-array-dev\respeaker\plot_directivity.py .\Python\Tests\mic-array-dev\data\directivity\Multipass_70cm\directivity_multipass_averaged_300_600.csv --min-scale -30
+    #
+    # To flip verticaly the axis:
+    # .venv\Scripts\python.exe .\Python\Tests\mic-array-dev\respeaker\plot_directivity.py .\Python\Tests\mic-array-dev\data\directivity\Multipass_70cm\directivity_multipass_averaged_300_600.csv --flip-axis

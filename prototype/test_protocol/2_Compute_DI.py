@@ -36,27 +36,31 @@ import matplotlib.pyplot as plt
 # CONFIGURATION PARAMETERS (modify these manually)
 # ============================================================================
 
+BASE_DIR = "Python/Tests/mic-array-dev/"
+
 # Path to noise measurement CSV (averaged across all directions in the file)
-NOISE_CSV_FILE = "data/test_protocol/di_noise/di_noise_averaged_*.csv"
+NOISE_CSV_FILE = BASE_DIR + "data/test_protocol/2_directivity_index/1_square/di_noise_averaged.csv"
 
 # Dictionary mapping frequency (Hz) to signal CSV file path
 # Example: {1000: "path/to/1khz.csv", 2000: "path/to/2khz.csv", ...}
 SIGNAL_CSV_FILES = {
-    # 500: "data/test_protocol/di_signal/snr_signal_averaged_500hz.csv",
-    # 1000: "data/test_protocol/di_signal/snr_signal_averaged_1khz.csv",
-    # 2000: "data/test_protocol/di_signal/snr_signal_averaged_2khz.csv",
-    # 4000: "data/test_protocol/di_signal/snr_signal_averaged_4khz.csv",
+    500: BASE_DIR + "data/test_protocol/1_polar_pattern/1_square/polar_pattern_500_Hz.csv",
+    1000: BASE_DIR + "data/test_protocol/1_polar_pattern/1_square/polar_pattern_1000_Hz.csv",
+    1500: BASE_DIR + "data/test_protocol/1_polar_pattern/1_square/polar_pattern_1500_Hz.csv",
+    2000: BASE_DIR + "data/test_protocol/1_polar_pattern/1_square/polar_pattern_2000_Hz.csv",
+    3000: BASE_DIR + "data/test_protocol/1_polar_pattern/1_square/polar_pattern_3000_Hz.csv",
+    4000: BASE_DIR + "data/test_protocol/1_polar_pattern/1_square/polar_pattern_4000_Hz.csv",
 }
 
 # List of directions (degrees) to analyze
-MEASUREMENT_DIRECTIONS = [0, 15, 30, 45, 90, 180, 270, 315, 330, 345]
+MEASUREMENT_DIRECTIONS = [0, 15, 30, 45, 315, 330, 345]
 
 # Output directory for results
-OUTPUT_DIR = "data/test_protocol/di_analysis"
+OUTPUT_DIR = BASE_DIR + "data/test_protocol/2_directivity_index/1_square"
 
 # Column names in CSV files (update if your CSVs use different column names)
-GAIN_COLUMN_NAME = "gain_db"      # or "rms_dbfs" depending on your CSV
-ANGLE_COLUMN_NAME = "angle_deg"   # or "expected_angle"
+GAIN_COLUMN_NAME = "rms_dbfs"      # or "rms_dbfs" depending on your CSV
+ANGLE_COLUMN_NAME = "expected_angle"   # or "expected_angle"
 
 # If True, interpolate gain values at exact requested directions
 # If False, find the closest direction in the CSV

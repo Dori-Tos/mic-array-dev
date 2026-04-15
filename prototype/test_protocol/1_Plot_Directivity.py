@@ -13,6 +13,8 @@ def plot_directivity(
     reference_max_rms=None,
     min_scale=None,
     quarter_graph=False,
+    half_rotation=False,
+    side=False,
 ):
     """
     Plot directivity pattern from measurement data.
@@ -29,6 +31,12 @@ def plot_directivity(
                    If None, y-axis uses autoscaling based on data.
         quarter_graph: If True, mirror front-quarter measurements to the opposite front side
                   (left-right symmetry) and show only the front hemisphere.
+        half_rotation: If True, handle half-pattern measurements.
+                  Combine with --side for side pattern (0-180° → 0-360° with left-right mirroring).
+                  Without --side, shows front pattern (-90 to 90°, no mirroring).
+        side: If True with --half-rotation, apply side pattern mode (0-180°).
+              Data is mirrored left-right (around vertical axis) to create full circle.
+              If False with --half-rotation, apply front pattern mode (-90 to 90°, no mirroring).
     """
     # Load data
     df = pd.read_csv(csv_file)
@@ -59,10 +67,31 @@ def plot_directivity(
     angle_column = 'relative_angle' if use_relative_angle else 'expected_angle'
     angle_label = 'Relative Angle (from locked DOA)' if use_relative_angle else 'Angle'
 
-    # Optional quarter-front mirror mode:
+    # Handle half-rotation modes (side or front pattern)
+    if half_rotation:
+        if side:
+            # Side pattern (0-180°) with left-right mirroring around the vertical axis
+            # Mirror formula: 360° - angle creates the opposite side
+            # Original data: 0° to 180°, Mirrored: 180° to 360° (excludes duplicates at 0° and 180°)
+            mirrored = df.copy()
+            mirrored_angles = 360.0 - mirrored[angle_column]
+            mirrored[angle_column] = mirrored_angles
+            # Avoid duplicate points at 0° and 180° when mirroring
+            mirrored = mirrored[~np.isclose(mirrored[angle_column], df[angle_column])]
+            df = pd.concat([df, mirrored], ignore_index=True)
+            df = df.sort_values(angle_column).reset_index(drop=True)
+            theta_ticks = np.arange(0, 361, 45)
+        else:
+            # Front pattern (-90 to 90°) without mirroring
+            # Convert to continuous front-domain: 0° stays 0°, range is -90 to 90
+            df[angle_column] = ((df[angle_column] + 180.0) % 360.0) - 180.0
+            df = df[(df[angle_column] >= -90.0) & (df[angle_column] <= 90.0)]
+            df = df.sort_values(angle_column).reset_index(drop=True)
+            theta_ticks = np.arange(-90, 91, 30)
+    # Optional quarter-front mirror mode (existing):
     # measured front quarter (typically 0..90) is mirrored to 360-angle (270..360)
     # to visualize left-right symmetry while excluding the back hemisphere.
-    if quarter_graph:
+    elif quarter_graph:
         mirrored = df.copy()
         mirrored[angle_column] = (360.0 - mirrored[angle_column]) % 360.0
         # Avoid duplicate points at 0° and 180° when mirroring.
@@ -73,9 +102,10 @@ def plot_directivity(
         df[angle_column] = ((df[angle_column] + 180.0) % 360.0) - 180.0
         df = df[(df[angle_column] >= -90.0) & (df[angle_column] <= 90.0)]
         df = df.sort_values(angle_column).reset_index(drop=True)
-
-    # Use sparse, readable angular tick labels to avoid overlap.
-    theta_ticks = np.arange(-90, 91, 30) if quarter_graph else np.arange(0, 360, 45)
+        theta_ticks = np.arange(-90, 91, 30)
+    else:
+        # Full circle mode (default)
+        theta_ticks = np.arange(0, 360, 45)
 
     # Build integer-only dB ticks to remove decimal labels like 0.0, -2.5, ...
     data_min_db = float(np.floor(df['rms_dbfs'].min()))
@@ -105,7 +135,7 @@ def plot_directivity(
         # Main polar plot for RMS level
         ax1 = plt.subplot(221, projection='polar')
         
-        if quarter_graph:
+        if quarter_graph or half_rotation:
             angles_plot = df[angle_column].values
             rms_plot = df['rms_dbfs'].values
         else:
@@ -121,6 +151,9 @@ def plot_directivity(
         if quarter_graph:
             ax1.set_thetamin(-90)
             ax1.set_thetamax(90)
+        elif half_rotation and not side:
+            ax1.set_thetamin(-90)
+            ax1.set_thetamax(90)
         ax1.set_title('RMS Level (dBFS)', pad=20, fontsize=12, fontweight='bold')
         ax1.grid(True)
         ax1.legend(loc='upper right')
@@ -132,7 +165,7 @@ def plot_directivity(
         # Polar plot for Peak level
         ax2 = plt.subplot(222, projection='polar')
         
-        if quarter_graph:
+        if quarter_graph or half_rotation:
             peak_plot = df['peak_dbfs'].values
         else:
             # Close the loop for full-circle plots
@@ -143,6 +176,9 @@ def plot_directivity(
         ax2.set_theta_direction(-1)
         ax2.set_thetagrids(theta_ticks)
         if quarter_graph:
+            ax2.set_thetamin(-90)
+            ax2.set_thetamax(90)
+        elif half_rotation and not side:
             ax2.set_thetamin(-90)
             ax2.set_thetamax(90)
         ax2.set_title('Peak Level (dBFS)', pad=20, fontsize=12, fontweight='bold')
@@ -162,8 +198,17 @@ def plot_directivity(
         ax3.set_title('Signal Levels vs Angle', fontsize=12, fontweight='bold')
         ax3.grid(True, alpha=0.3)
         ax3.legend()
-        ax3.set_xlim([-90, 90] if quarter_graph else [0, 360])
-        ax3.xaxis.set_major_locator(MultipleLocator(30 if quarter_graph else 45))
+        if quarter_graph:
+            xlim = [-90, 90]
+            x_interval = 30
+        elif half_rotation:
+            xlim = [0, 180] if side else [-90, 90]
+            x_interval = 30
+        else:
+            xlim = [0, 360]
+            x_interval = 45
+        ax3.set_xlim(xlim)
+        ax3.xaxis.set_major_locator(MultipleLocator(x_interval))
         ax3.yaxis.set_major_locator(MaxNLocator(integer=True))
         ax3.yaxis.set_major_formatter(FormatStrFormatter('%d'))
         if min_scale is not None:
@@ -177,8 +222,17 @@ def plot_directivity(
             ax4.set_ylabel('RMS Level (dBFS)', fontsize=10)
             ax4.set_title('Directivity Pattern (Relative to Locked DOA)', fontsize=12, fontweight='bold')
             ax4.grid(True, alpha=0.3)
-            ax4.set_xlim([-90, 90] if quarter_graph else [0, 360])
-            ax4.xaxis.set_major_locator(MultipleLocator(30 if quarter_graph else 45))
+            if quarter_graph:
+                xlim = [-90, 90]
+                x_interval = 30
+            elif half_rotation:
+                xlim = [0, 180] if side else [-90, 90]
+                x_interval = 30
+            else:
+                xlim = [0, 360]
+                x_interval = 45
+            ax4.set_xlim(xlim)
+            ax4.xaxis.set_major_locator(MultipleLocator(x_interval))
             ax4.yaxis.set_major_locator(MaxNLocator(integer=True))
             ax4.yaxis.set_major_formatter(FormatStrFormatter('%d'))
             if min_scale is not None:
@@ -189,14 +243,23 @@ def plot_directivity(
             ax4.set_ylabel('Detected DOA Angle (degrees)', fontsize=10)
             ax4.set_title('Direction of Arrival Detection', fontsize=12, fontweight='bold')
             ax4.grid(True, alpha=0.3)
-            ax4.set_xlim([-90, 90] if quarter_graph else [0, 360])
-            ax4.xaxis.set_major_locator(MultipleLocator(30 if quarter_graph else 45))
+            if quarter_graph:
+                xlim = [-90, 90]
+                ylim = [-90, 90]
+                x_interval = 30
+            elif half_rotation:
+                xlim = [0, 180] if side else [-90, 90]
+                ylim = [0, 180] if side else [-90, 90]
+                x_interval = 30
+            else:
+                xlim = [0, 360]
+                ylim = [0, 360]
+                x_interval = 45
+            ax4.set_xlim(xlim)
+            ax4.set_ylim(ylim)
+            ax4.xaxis.set_major_locator(MultipleLocator(x_interval))
             ax4.yaxis.set_major_locator(MaxNLocator(integer=True))
             ax4.yaxis.set_major_formatter(FormatStrFormatter('%d'))
-            if quarter_graph:
-                ax4.set_ylim([-90, 90])
-            else:
-                ax4.set_ylim([0, 360])
         else:
             # For standard mic, show cartesian plot instead
             ax4.plot(df[angle_column], df['rms_dbfs'], 'b-o', linewidth=2, markersize=4)
@@ -204,8 +267,17 @@ def plot_directivity(
             ax4.set_ylabel('RMS Level (dB)', fontsize=10)
             ax4.set_title('Directivity Pattern', fontsize=12, fontweight='bold')
             ax4.grid(True, alpha=0.3)
-            ax4.set_xlim([-90, 90] if quarter_graph else [0, 360])
-            ax4.xaxis.set_major_locator(MultipleLocator(30 if quarter_graph else 45))
+            if quarter_graph:
+                xlim = [-90, 90]
+                x_interval = 30
+            elif half_rotation:
+                xlim = [0, 180] if side else [-90, 90]
+                x_interval = 30
+            else:
+                xlim = [0, 360]
+                x_interval = 45
+            ax4.set_xlim(xlim)
+            ax4.xaxis.set_major_locator(MultipleLocator(x_interval))
             ax4.yaxis.set_major_locator(MaxNLocator(integer=True))
             ax4.yaxis.set_major_formatter(FormatStrFormatter('%d'))
             if min_scale is not None:
@@ -242,7 +314,7 @@ def plot_directivity(
         fig = plt.figure(figsize=(8, 6))
         ax1 = plt.subplot(111, projection='polar')
         
-        if quarter_graph:
+        if quarter_graph or half_rotation:
             angles_plot = df[angle_column].values
             rms_plot = df['rms_dbfs'].values
         else:
@@ -256,6 +328,9 @@ def plot_directivity(
         ax1.set_theta_direction(-1)
         ax1.set_thetagrids(theta_ticks)
         if quarter_graph:
+            ax1.set_thetamin(-90)
+            ax1.set_thetamax(90)
+        elif half_rotation and not side:
             ax1.set_thetamin(-90)
             ax1.set_thetamax(90)
         title = 'RMS Level (dBFS)'
@@ -330,6 +405,10 @@ if __name__ == '__main__':
                         help='Minimum dB value for y-axis scaling (e.g., -30 for -30 dB floor). Allows consistent comparison between plots.')
     parser.add_argument('--quarter-graph', action='store_true',
                         help='Mirror front-quarter data left-right and plot only the front hemisphere')
+    parser.add_argument('--half-rotation', action='store_true',
+                        help='Handle half-pattern measurements (side or front pattern)')
+    parser.add_argument('--side', action='store_true',
+                        help='With --half-rotation: apply side pattern (0-180°) with left-right mirroring to create full circle. Without --half-rotation: ignored. Default is front pattern (-90 to 90°)')
     
     args = parser.parse_args()
     
@@ -340,15 +419,26 @@ if __name__ == '__main__':
         reference_max_rms=args.reference_max_rms,
         min_scale=args.min_scale,
         quarter_graph=args.quarter_graph,
+        half_rotation=args.half_rotation,
+        side=args.side,
     )
 
     
     # Example:
-    # .venv\Scripts\python.exe .\Python\Tests\mic-array-dev\respeaker\plot_directivity.py .\Python\Tests\mic-array-dev\data\directivity\Multipass_70cm\directivity_multipass_averaged_300_600.csv 
+    # .venv\Scripts\python.exe .\Python\Tests\mic-array-dev\prototype\test_protocol\1_Plot_Directivity.py .\Python\Tests\mic-array-dev\data\test_protocol\1_Polar_Pattern\1_Square\polar_pattern_averaged_2026-04-13_17-35-20.csv 
     #
     # The script automatically detects the maximum RMS as the baseline (0 dB reference).
     # To use the same baseline across multiple measurements:
-    # .venv\Scripts\python.exe .\Python\Tests\mic-array-dev\respeaker\plot_directivity.py .\Python\Tests\mic-array-dev\data\directivity\Multipass_70cm\another_measurement.csv --reference-max-rms 47.22
+    # .venv\Scripts\python.exe .\Python\Tests\mic-array-dev\prototype\test_protocol\1_Plot_Directivity.py .\data\...\polar_pattern.csv --reference-max-rms 47.22
     #
-    # To mirror the front pattern to the other side:
-    # .venv\Scripts\python.exe .\Python\Tests\mic-array-dev\prototype\test_protocol\1_Plot_Directivity.py .\Python\Tests\mic-array-dev\data\test_protocol\1_Polar_Pattern\1_Square\polar_pattern_averaged_2026-04-13_17-35-20.csv --quarter-graph 
+    # Mirror the front quarter pattern (0-90°) to left-right symmetry:
+    # .venv\Scripts\python.exe .\Python\Tests\mic-array-dev\prototype\test_protocol\1_Plot_Directivity.py .\data\...\polar_pattern.csv --quarter-graph
+    #
+    # Plot half-rotation front pattern (-90 to 90°, no mirroring):
+    # .venv\Scripts\python.exe .\Python\Tests\mic-array-dev\prototype\test_protocol\1_Plot_Directivity.py .\data\...\polar_pattern.csv --half-rotation
+    #
+    # Plot half-rotation side pattern (0-180° with left-right mirroring to show full circle):
+    # .venv\Scripts\python.exe .\Python\Tests\mic-array-dev\prototype\test_protocol\1_Plot_Directivity.py .\data\...\polar_pattern.csv --half-rotation --side
+    #
+    # Combined options with min scale:
+    # .venv\Scripts\python.exe .\Python\Tests\mic-array-dev\prototype\test_protocol\1_Plot_Directivity.py .\data\...\polar_pattern.csv --half-rotation --side --min-scale -30 
