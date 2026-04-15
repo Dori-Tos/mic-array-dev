@@ -104,6 +104,7 @@ def test_polar_pattern(
     use_pipeline=True,
     wait_between_passes=False,
     quarter_rotation=False,
+    half_rotation=False,
     edge_padding_points=2,
     alternate_rotation_direction=True,
     freeze_beamformer=True,
@@ -136,6 +137,8 @@ def test_polar_pattern(
         wait_between_passes: If True, wait for Enter key before starting next pass
         quarter_rotation: If True, measure only front 90° instead of full 360° (faster)
                          Useful for measuring front directivity and mirroring afterwards
+        half_rotation: If True, measure only front 180° instead of full 360° (faster than full)
+                       Useful for measuring front/rear directivity
         edge_padding_points: Number of extra measurements before 0° and after limit (e.g., 2).
                     These edge captures stabilize boundary bins; final averaged output keeps
                     only the in-range window [0..total_degrees].
@@ -158,7 +161,7 @@ def test_polar_pattern(
     output_path.mkdir(parents=True, exist_ok=True)
     
     # Calculate timing
-    total_degrees = 90 if quarter_rotation else 360
+    total_degrees = 90 if quarter_rotation else (180 if half_rotation else 360)
     degrees_per_measurement = total_degrees / resolution
     interval = seconds_per_rotation * (degrees_per_measurement / 360)  # Time per measurement point
     pass_duration = seconds_per_rotation * (total_degrees / 360.0)
@@ -188,7 +191,13 @@ def test_polar_pattern(
     print(f"  Sample rate: {sample_rate} Hz")
     print(f"  Channels: {num_channels} (array-based beamforming)")
     print(f"  Number of passes: {num_passes}")
-    print(f"  Measurement range: {total_degrees}° {f'(FRONT ONLY - will be mirrored)' if quarter_rotation else '(FULL CIRCLE)'}")
+    if quarter_rotation:
+        range_desc = '(FRONT ONLY - 90°, will be mirrored)'
+    elif half_rotation:
+        range_desc = '(FRONT/REAR half - 180°)'
+    else:
+        range_desc = '(FULL CIRCLE - 360°)'
+    print(f"  Measurement range: {total_degrees}° {range_desc}")
     print(f"  Resolution: {resolution} points ({degrees_per_measurement:.1f}° per measurement)")
     print(f"  Edge padding points: {edge_padding_points} (effective captures/pass: {padded_resolution})")
     print(f"  Turntable speed: {seconds_per_rotation} seconds/full rotation (adjusted for {total_degrees}° range)")
@@ -564,10 +573,11 @@ def test_polar_pattern(
     # Calculate averaged results by angle
     print("Averaging measurements across passes...")
 
-    # Keep in-range window plus half-bin overscan so slight post-limit samples
-    # can contribute to the endpoint bin (e.g., 90°) and avoid abrupt cutoff.
-    lower_bound = -0.5 * degrees_per_measurement
-    upper_bound = total_degrees + (0.5 * degrees_per_measurement)
+    # Include edge-padding region so boundary measurements stabilize the 0° and total_degrees bins.
+    # This allows the edge-padding captures to contribute to endpoint bins instead of being discarded.
+    # For half-rotation (180°): 0° bin gets data from ~-3.6° to +1.8°, 180° bin gets data from ~178.2° to +183.6°
+    lower_bound = -(edge_padding_points + 0.5) * degrees_per_measurement
+    upper_bound = total_degrees + (edge_padding_points + 0.5) * degrees_per_measurement
     df_avg = df_all[(df_all['relative_angle'] >= lower_bound) & (df_all['relative_angle'] <= upper_bound)].copy()
     if df_avg.empty:
         print("No in-range samples collected after filtering edge-padding points.")
@@ -577,8 +587,17 @@ def test_polar_pattern(
     # Bin to intended grid before averaging to avoid sawtooth high/low alternation.
     # Use an extra endpoint bin so the upper-limit angle (e.g., 90°) is explicitly represented.
     rel_angle = df_avg['relative_angle']
-    bin_idx = np.floor((rel_angle + (degrees_per_measurement * 0.5)) / degrees_per_measurement).astype(int)
-    bin_idx = np.clip(bin_idx, 0, resolution)
+    bin_idx_unclipped = np.floor((rel_angle + (degrees_per_measurement * 0.5)) / degrees_per_measurement).astype(int)
+    
+    # Remove outermost edge-padding measurements (first two bins before 0° and last two after total_degrees)
+    # Keep only the closest padding region to stabilize the boundaries without including initialization artifacts.
+    if edge_padding_points > 1:
+        valid_mask = (bin_idx_unclipped >= -(edge_padding_points - 1)) & (bin_idx_unclipped <= (resolution + edge_padding_points - 1))
+        df_avg = df_avg[valid_mask].copy()
+        bin_idx_unclipped = bin_idx_unclipped[valid_mask]
+        rel_angle = rel_angle[valid_mask]
+    
+    bin_idx = np.clip(bin_idx_unclipped, 0, resolution)
     df_avg['angle_bin'] = bin_idx
     df_avg['expected_angle_binned'] = (reference_angle + df_avg['angle_bin'] * degrees_per_measurement) % 360.0
     df_avg['relative_angle_binned'] = df_avg['angle_bin'] * degrees_per_measurement
@@ -666,10 +685,12 @@ if __name__ == '__main__':
                         help='Initial microphone pointing direction (default: 0°)')
     parser.add_argument('--no-pipeline', action='store_true',
                         help='Disable processing pipeline, record raw audio only')
-    parser.add_argument('--wait-between-passes', action='store_true',
-                        help='Wait for Enter key before starting each new pass')
+    parser.add_argument('--wait-between-passes', type=bool, default=True
+                        help='Wait for Enter key before starting each new pass (default: True)')
     parser.add_argument('--quarter-rotation', action='store_true',
                         help='Measure only front 90° instead of full 360° (useful for measuring front directivity and mirroring afterwards)')
+    parser.add_argument('--half-rotation', action='store_true',
+                        help='Measure only front 180° instead of full 360° (faster than full, measures front and rear)')
     parser.add_argument('--edge-padding-points', type=int, default=2,
                         help='Extra measurements before 0° and after the rotation limit (default: 2)')
     parser.add_argument('--alternate-rotation-direction', action=argparse.BooleanOptionalAction, default=False,
@@ -678,7 +699,7 @@ if __name__ == '__main__':
                         help='Freeze beamformer steering during the full measurement run (default: enabled)')
     parser.add_argument('--freeze-angle', type=float, default=0.0,
                         help='Steering angle used when beamformer freeze is enabled (default: 0.0)')
-    parser.add_argument('--enable-agc', action=argparse.BooleanOptionalAction, default=False,
+    parser.add_argument('--enable-agc', action=argparse.BooleanOptionalAction, default=True,
                         help='Enable both AGC stages (AdaptiveAmplifier + PedalboardAGC) (default: disabled)')
     parser.add_argument('--enable-spectral-filter', action=argparse.BooleanOptionalAction, default=True,
                         help='Enable spectral subtraction filter (default: enabled)')
@@ -717,6 +738,7 @@ if __name__ == '__main__':
         use_pipeline=not args.no_pipeline,
         wait_between_passes=args.wait_between_passes,
         quarter_rotation=args.quarter_rotation,
+        half_rotation=args.half_rotation,
         edge_padding_points=args.edge_padding_points,
         alternate_rotation_direction=args.alternate_rotation_direction,
         freeze_beamformer=args.freeze_beamformer,
@@ -739,6 +761,9 @@ if __name__ == '__main__':
     #
     # Front directivity only (90°, mirrored afterwards) - 3 passes, 50 points:
     # python prototype/test_protocol/1_Polar_Pattern.py --device 1 --passes 3 --resolution 50 --rotation-time 120 --duration 0.8 --quarter-rotation
+    #
+    # Front/rear directivity (180°) - shorter test:
+    # python prototype/test_protocol/1_Polar_Pattern.py --device 1 --passes 3 --resolution 50 --rotation-time 120 --duration 0.8 --half-rotation
     #
     # Raw audio only (no processing pipeline):
     # python prototype/test_protocol/1_Polar_Pattern.py --device 1 --no-pipeline --passes 3 --resolution 50 --rotation-time 120
