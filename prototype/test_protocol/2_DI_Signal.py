@@ -245,6 +245,7 @@ def test_di_signal(
             weight_smooth_alpha_min=0.45,
             weight_smooth_alpha_max=0.82,
             snr_threshold_for_sharpening=2.0,
+            backward_null_strength=0.9,
         )
         
         # Filters (same config as test_pipeline.py)

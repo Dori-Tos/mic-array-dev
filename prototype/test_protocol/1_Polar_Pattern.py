@@ -147,7 +147,8 @@ def test_polar_pattern(
         freeze_beamformer: If True, keep steering fixed to freeze_angle_deg for all measurements
         freeze_angle_deg: Steering angle used when freeze_beamformer is enabled
         enable_agc: If True, enable both AGC stages (AdaptiveAmplifier + PedalboardAGC).
-                Default False for linear directivity measurements.
+                Default False for directivity measurements (AGC disabled to isolate beamformer response).
+                Enable only to test end-to-end system behavior with adaptive gain.
         enable_spectral_filter: If True, enable SpectralSubtractionFilter (default True).
         save_on_interrupt: If True, save partial data when interrupted by Ctrl+C.
                   Default False to avoid saving incomplete measurements.
@@ -213,7 +214,7 @@ def test_polar_pattern(
         print(f"    - Beamformer: MVDR")
         print(f"    - BandPass filter: ON")
         print(f"    - Spectral subtraction: {'ON' if enable_spectral_filter else 'OFF'}")
-        print(f"    - AGC chain (both stages): {'ON' if enable_agc else 'OFF'}")
+        print(f"    - AGC chain (both stages): {'ON (end-to-end testing)' if enable_agc else 'OFF (default - isolates beamformer)'}")
         print(f"  Beamformer freeze: {'ON' if freeze_beamformer else 'OFF'}")
         if freeze_beamformer:
             print(f"  Beamformer freeze angle: {float(freeze_angle_deg):.1f}°")
@@ -279,6 +280,7 @@ def test_polar_pattern(
             weight_smooth_alpha_min=0.45,
             weight_smooth_alpha_max=0.82,
             snr_threshold_for_sharpening=2.0,
+            backward_null_strength=0.9,
         )
         
         # Filters (same config as test_pipeline.py)
@@ -699,8 +701,8 @@ if __name__ == '__main__':
                         help='Freeze beamformer steering during the full measurement run (default: enabled)')
     parser.add_argument('--freeze-angle', type=float, default=0.0,
                         help='Steering angle used when beamformer freeze is enabled (default: 0.0)')
-    parser.add_argument('--enable-agc', action=argparse.BooleanOptionalAction, default=True,
-                        help='Enable both AGC stages (AdaptiveAmplifier + PedalboardAGC) (default: disabled)')
+    parser.add_argument('--enable-agc', action=argparse.BooleanOptionalAction, default=False,
+                        help='Enable both AGC stages (AdaptiveAmplifier + PedalboardAGC). DISABLED by default for directivity measurements to isolate beamformer performance. Enable only to test end-to-end system behavior.')
     parser.add_argument('--enable-spectral-filter', action=argparse.BooleanOptionalAction, default=True,
                         help='Enable spectral subtraction filter (default: enabled)')
     parser.add_argument('--save-on-interrupt', action=argparse.BooleanOptionalAction, default=False,

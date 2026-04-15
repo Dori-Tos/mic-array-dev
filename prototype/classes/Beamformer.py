@@ -287,6 +287,7 @@ class MVDRBeamformer(Beamformer):
         self._covariance: np.ndarray | None = None
         self._prev_weights: np.ndarray | None = None
         self._power_iteration_vec: np.ndarray | None = None
+        self._last_coherence: np.ndarray | None = None  # Store last computed coherence for external use (e.g., AGC)
         self._identity = np.eye(self.channel_count, dtype=np.complex128)
         self._eps = 1e-12
 
@@ -294,6 +295,17 @@ class MVDRBeamformer(Beamformer):
         self._covariance = None
         self._prev_weights = None
         self._power_iteration_vec = None
+        self._last_coherence = None
+    
+    def get_last_coherence(self) -> np.ndarray | None:
+        """
+        Retrieve the coherence signal from the last process() call.
+        Useful for passing to AGC for coherence-gated gain control.
+        
+        Returns:
+            np.ndarray of shape (freq_bins,) with coherence values in [0, 1], or None if not computed.
+        """
+        return self._last_coherence
 
     def _power_iteration(self, matrix: np.ndarray, num_iterations: int = 2) -> tuple[float, np.ndarray]:
         """
@@ -567,6 +579,9 @@ class MVDRBeamformer(Beamformer):
         # This reduces energy from frequency bins with low inter-channel coherence (diffuse noise)
         output_spectrum = np.einsum("fi,fi->f", np.conj(weights), spectrum, optimize=True)
         output_spectrum *= coherence_gain  # Suppress low-coherence frequencies
+
+        # Store coherence for external use (e.g., AGC coherence gating)
+        self._last_coherence = coherence.copy()
 
         return np.fft.irfft(output_spectrum, n=n_samples).astype(np.float64, copy=False)
 

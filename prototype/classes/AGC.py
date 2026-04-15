@@ -301,10 +301,16 @@ class NoiseAwareAdaptiveAmplifier:
         self._last_active_time = time.time()
         self._last_log_time = time.time()
     
-    def process(self, samples: np.ndarray, sample_rate: float) -> np.ndarray:
+    def process(self, samples: np.ndarray, sample_rate: float, coherence_signal: np.ndarray | None = None) -> np.ndarray:
         """
         Apply noise-aware adaptive amplification.
         Prevents AGC from chasing and amplifying residual noise into audible artifacts.
+        
+        :param samples: Input audio samples
+        :param sample_rate: Sample rate in Hz
+        :param coherence_signal: Optional inter-channel coherence per frequency bin (shape: freq_bins,).
+                                 If provided, gates AGC boost when coherence is low (diffuse noise, back diffraction).
+                                 Range: [0, 1] where 1=coherent point-source, 0=incoherent diffuse noise.
         """
         x = np.asarray(samples, dtype=np.float32).reshape(-1)
         if x.size == 0:
@@ -324,6 +330,19 @@ class NoiseAwareAdaptiveAmplifier:
         
         # Compute SNR in dB
         snr_db = 20.0 * float(np.log10(max(rms, self._eps) / max(self.noise_floor_rms, self._eps)))
+        
+        # COHERENCE-BASED GATING: Suppress AGC boost when coherence is low (diffuse/back noise)
+        # Coherence is an indicator of signal quality:
+        # - High coherence (>0.7) = coherent point-source (speech) -> allow normal AGC boost
+        # - Low coherence (<0.5) = diffuse noise (back/room diffraction) -> suppress boost
+        coherence_gate = 1.0  # Default: full boost
+        if coherence_signal is not None:
+            avg_coherence = float(np.mean(np.clip(coherence_signal, 0.0, 1.0)))
+            # Linear gate: coherence of 0.7 = full boost (1.0), coherence of 0.4 = half boost (0.5), coherence of 0.0 = no boost
+            coherence_threshold = 0.6  # Below this, start suppressing boost
+            if avg_coherence < coherence_threshold:
+                # Suppress boost strength when coherence is low
+                coherence_gate = np.clip((avg_coherence - 0.2) / (coherence_threshold - 0.2), 0.0, 1.0)
         
         # Only allow gain to increase if SNR is above threshold (indicating speech, not noise)
         # Otherwise, allow only gain decrease to prevent noise amplification
@@ -353,6 +372,12 @@ class NoiseAwareAdaptiveAmplifier:
             peak_damping = 1.0 - self.peak_protect_strength * min(1.0, (peak - self.peak_protect_threshold) / (1.0 - self.peak_protect_threshold))
             desired_gain *= peak_damping
         
+        # Apply coherence gate: suppress upward adaptation when coherence is low (back noise)
+        # If coherence is low, desired_gain won't increase as much
+        if coherence_gate < 1.0:
+            # Blend toward current gain (no increase) when coherence is poor
+            desired_gain = self.current_gain + (desired_gain - self.current_gain) * coherence_gate
+        
         # Asymmetric gain adaptation: fast down, slow up
         if desired_gain > self.current_gain:
             if can_increase_gain:
@@ -371,9 +396,10 @@ class NoiseAwareAdaptiveAmplifier:
         
         # Debug logging (every 1 second)
         if current_time - self._last_log_time >= 1.0:
+            coherence_str = f"Coherence: {float(np.mean(coherence_signal if coherence_signal is not None else [0.0])):.3f}" if coherence_signal is not None else "NoCoherence"
             self.logger.debug(
                 f"[NoiseAwareAdaptiveAmplifier] RMS: {rms:.5f} | Noise floor: {self.noise_floor_rms:.5f} | "
-                f"SNR: {snr_db:.1f} dB | Current gain: {self.current_gain:.2f}x (max eff: {max_gain_effective:.2f}x) | "
+                f"SNR: {snr_db:.1f} dB | {coherence_str} (gate: {coherence_gate:.2f}) | Current gain: {self.current_gain:.2f}x (max eff: {max_gain_effective:.2f}x) | "
                 f"Peak before: {peak:.4f} → after: {peak_after:.4f} | HighSNR: {is_high_snr}"
             )
             self._last_log_time = current_time
@@ -399,11 +425,26 @@ class AGCChain:
             if hasattr(stage, "reset"):
                 stage.reset()
     
-    def process(self, samples: np.ndarray, sample_rate: float) -> np.ndarray:
-        """Process through all stages sequentially."""
+    def process(self, samples: np.ndarray, sample_rate: float, coherence_signal: np.ndarray | None = None) -> np.ndarray:
+        """
+        Process through all stages sequentially.
+        
+        :param samples: Input audio samples
+        :param sample_rate: Sample rate in Hz
+        :param coherence_signal: Optional inter-channel coherence signal. Passed to stages that support coherence gating.
+        """
         y = samples
         for stage in self.stages:
-            y = stage.process(y, sample_rate)
+            # Pass coherence to stages that support it; ignore for stages that don't
+            if hasattr(stage, 'process'):
+                import inspect
+                sig = inspect.signature(stage.process)
+                if 'coherence_signal' in sig.parameters:
+                    y = stage.process(y, sample_rate, coherence_signal=coherence_signal)
+                else:
+                    y = stage.process(y, sample_rate)
+            else:
+                y = stage.process(y, sample_rate)
         return np.asarray(y, dtype=np.float32).reshape(-1)
 
 

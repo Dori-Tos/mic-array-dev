@@ -270,6 +270,7 @@ def test_di_noise(
             weight_smooth_alpha_min=0.45,
             weight_smooth_alpha_max=0.82,
             snr_threshold_for_sharpening=2.0,
+            backward_null_strength=0.9,
         )
         
         # Filters (same config as test_pipeline.py)
@@ -692,7 +693,7 @@ if __name__ == '__main__':
                         help='Freeze beamformer steering during the full measurement run (default: enabled)')
     parser.add_argument('--freeze-angle', type=float, default=0.0,
                         help='Steering angle used when beamformer freeze is enabled (default: 0.0)')
-    parser.add_argument('--enable-agc', action=argparse.BooleanOptionalAction, default=True,
+    parser.add_argument('--enable-agc', action=argparse.BooleanOptionalAction, default=False,
                         help='Enable both AGC stages (AdaptiveAmplifier + PedalboardAGC) (default: disabled)')
     parser.add_argument('--enable-spectral-filter', action=argparse.BooleanOptionalAction, default=True,
                         help='Enable spectral subtraction filter (default: enabled)')

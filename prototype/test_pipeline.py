@@ -125,7 +125,7 @@ def _build_mode_components(
         weight_smooth_alpha_min=0.45,
         weight_smooth_alpha_max=0.82,
         snr_threshold_for_sharpening=2.0,
-        backward_null_strength=0.8,
+        backward_null_strength=0.9,
     )
 
     doa_estimator = IterativeDOAEstimator(
