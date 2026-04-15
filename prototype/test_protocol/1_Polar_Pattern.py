@@ -685,7 +685,7 @@ if __name__ == '__main__':
                         help='Initial microphone pointing direction (default: 0°)')
     parser.add_argument('--no-pipeline', action='store_true',
                         help='Disable processing pipeline, record raw audio only')
-    parser.add_argument('--wait-between-passes', type=bool, default=True
+    parser.add_argument('--wait-between-passes', type=bool, default=True,
                         help='Wait for Enter key before starting each new pass (default: True)')
     parser.add_argument('--quarter-rotation', action='store_true',
                         help='Measure only front 90° instead of full 360° (useful for measuring front directivity and mirroring afterwards)')
