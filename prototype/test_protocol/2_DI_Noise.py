@@ -1,8 +1,8 @@
 """
-Polar Pattern Test Protocol
-===========================
+DI Noise Test Protocol
+======================
 
-Measures the polar pattern (directivity) of a microphone array using the full audio processing pipeline.
+Measures the sound power of a background noise produced by mutliple sources.
 Performs multi-pass measurements at different angles, applies the complete beamforming and filtering chain,
 and saves results in standardized CSV format for analysis and comparison.
 
@@ -48,7 +48,7 @@ from classes.Beamformer import DASBeamformer, MVDRBeamformer
 from classes.EchoCanceller import EchoCanceller
 from classes.Array_RealTime import apply_realtime_processing_chain
 from classes.Filter import BandPassFilter, SpectralSubtractionFilter
-from classes.AGC import AdaptiveAmplifier, PedalboardAGC, AGCChain
+from classes.AGC import NoiseAwareAdaptiveAmplifier, PedalboardAGC, AGCChain
 
 
 def _consume_backspace_request() -> bool:
@@ -92,14 +92,14 @@ def _pass_keyboard_mode():
         yield
 
 
-def test_polar_pattern(
+def test_di_noise(
     num_passes=3,
     resolution=50,
     seconds_per_rotation=120,
     device_index=None,
     sample_duration=0.8,
     rotation_direction='counterclockwise',
-    output_dir='data/polar_pattern',
+    output_dir='data/di_noise',
     reference_angle=0,
     use_pipeline=True,
     wait_between_passes=False,
@@ -299,28 +299,28 @@ def test_polar_pattern(
         # AGC chain (same config as test_pipeline.py)
         if enable_agc:
             agc = AGCChain(logger=logger, stages=[
-                AdaptiveAmplifier(
+                NoiseAwareAdaptiveAmplifier(
                     logger=logger,
-                    target_rms=0.08,
-                    min_gain=1.0,
-                    max_gain=6.0,  # Updated from 12.0 (prevent oscillation)
-                    adapt_alpha=0.04,
-                    speech_activity_rms=0.00012,
-                    silence_decay_alpha=0.008,
-                    activity_hold_ms=600.0,
-                    peak_protect_threshold=0.30,  # Updated from 0.35
-                    peak_protect_strength=1.0,  # Updated from 0.85 (maximum protection)
-                    max_gain_warn_rms_min=0.001,
+                    target_rms=0.08,         
+                    min_gain=0.7,            
+                    max_gain_baseline=6.0,   
+                    gain_up_alpha=0.008,     
+                    gain_down_alpha=0.15,    
+                    snr_threshold_db=8.0,     
+                    noise_floor_alpha=0.997, 
+                    activity_hold_ms=100.0,   
+                    peak_protect_threshold=0.30,  
+                    peak_protect_strength=1.0, 
                 ),
                 PedalboardAGC(
                     logger=logger,
                     sample_rate=sample_rate,
-                    threshold_db=-20.0,
-                    ratio=2.0,  # Updated from 3.5 (gentler compression)
-                    attack_ms=3.0,
-                    release_ms=140.0,
-                    limiter_threshold_db=-7.0,  # Updated from -1.4 (much lower headroom)
-                    limiter_release_ms=50.0  # Updated from 100.0
+                    threshold_db=-20.0,       
+                    ratio=2.0,                
+                    attack_ms=3.0,            
+                    release_ms=140.0,         
+                    limiter_threshold_db=-7.0,
+                    limiter_release_ms=50.0
                 ),
             ])
         else:
@@ -664,26 +664,24 @@ if __name__ == '__main__':
                         help='Number of complete rotations (default: 3)')
     parser.add_argument('--resolution', type=int, default=50,
                         help='Number of measurement points per rotation (default: 50)')
-    parser.add_argument('--rotation-time', type=float, default=120.0,
-                        help='Time for one rotation in seconds (default: 120.0)')
+    parser.add_argument('--rotation-time', type=float, default=80.0,
+                        help='Time for one rotation in seconds (default: 80.0)')
     parser.add_argument('--device', type=int, default=None,
                         help='Audio device index (default: system default input device)')
-    parser.add_argument('--list-devices', action='store_true',
-                        help='List available audio devices and exit')
     parser.add_argument('--duration', type=float, default=0.8,
                         help='Audio sample duration in seconds (default: 0.8)')
     parser.add_argument('--rotation-direction', type=str,
                         choices=['clockwise', 'counterclockwise'],
                         default='counterclockwise',
                         help='Direction of turntable rotation (default: counterclockwise)')
-    parser.add_argument('--output', type=str, default='data/test_protocol/polar_pattern',
-                        help='Output directory (default: data/test_protocol/polar_pattern)')
+    parser.add_argument('--output', type=str, default='data/test_protocol/di_noise',
+                        help='Output directory (default: data/test_protocol/di_noise)')
     parser.add_argument('--reference-angle', type=int, default=0,
                         help='Initial microphone pointing direction (default: 0°)')
-    parser.add_argument('--no-pipeline', action='store_true',
-                        help='Disable processing pipeline, record raw audio only')
-    parser.add_argument('--wait-between-passes', action='store_true',
-                        help='Wait for Enter key before starting each new pass')
+    parser.add_argument('--no-pipeline', type=bool, default=False,
+                        help='Disable processing pipeline, record raw audio only (default: False)')
+    parser.add_argument('--wait-between-passes', type=bool, default=True,
+                        help='Wait for Enter key before starting each new pass (default: True)')
     parser.add_argument('--quarter-rotation', action='store_true',
                         help='Measure only front 90° instead of full 360° (useful for measuring front directivity and mirroring afterwards)')
     parser.add_argument('--edge-padding-points', type=int, default=2,
@@ -694,7 +692,7 @@ if __name__ == '__main__':
                         help='Freeze beamformer steering during the full measurement run (default: enabled)')
     parser.add_argument('--freeze-angle', type=float, default=0.0,
                         help='Steering angle used when beamformer freeze is enabled (default: 0.0)')
-    parser.add_argument('--enable-agc', action=argparse.BooleanOptionalAction, default=False,
+    parser.add_argument('--enable-agc', action=argparse.BooleanOptionalAction, default=True,
                         help='Enable both AGC stages (AdaptiveAmplifier + PedalboardAGC) (default: disabled)')
     parser.add_argument('--enable-spectral-filter', action=argparse.BooleanOptionalAction, default=True,
                         help='Enable spectral subtraction filter (default: enabled)')
@@ -703,25 +701,8 @@ if __name__ == '__main__':
     
     args = parser.parse_args()
     
-    if args.list_devices:
-        print("\nAvailable Audio Input Devices:")
-        print("=" * 70)
-        devices = sd.query_devices()
-        for i, dev in enumerate(devices):
-            try:
-                is_input = dev['max_input_channels'] > 0
-                channels = dev['max_input_channels']
-                samplerate = int(dev['default_samplerate'])
-                if is_input:
-                    default_marker = ' [DEFAULT INPUT]' if i == sd.default.device[0] else ''
-                    print(f"  {i:2d}: {dev['name']:<40} ({channels} channels, {samplerate} Hz){default_marker}")
-            except (IndexError, TypeError):
-                pass
-        print("=" * 70)
-        exit(0)
-    
     # Run test
-    test_polar_pattern(
+    test_di_noise(
         num_passes=args.passes,
         resolution=args.resolution,
         seconds_per_rotation=args.rotation_time,
@@ -743,24 +724,9 @@ if __name__ == '__main__':
     )
     
     # Usage examples:
-    # 
-    # List available audio devices:
-    # python prototype/test_protocol/1_Polar_Pattern.py --list-devices
-    #
-    # Standard measurement with full pipeline (3 passes, 50 points, 120 sec/rotation):
-    # python prototype/test_protocol/1_Polar_Pattern.py --device 1 --passes 3 --resolution 50 --rotation-time 120 --duration 0.8
-    #
-    # Quick test (1 pass, 36 points, 60 sec/rotation):
-    # python prototype/test_protocol/1_Polar_Pattern.py --device 1 --passes 1 --resolution 36 --rotation-time 60 --duration 0.8
-    #
-    # Front directivity only (90°, mirrored afterwards) - 3 passes, 50 points:
-    # python prototype/test_protocol/1_Polar_Pattern.py --device 1 --passes 3 --resolution 50 --rotation-time 120 --duration 0.8 --quarter-rotation
-    #
-    # Raw audio only (no processing pipeline):
-    # python prototype/test_protocol/1_Polar_Pattern.py --device 1 --no-pipeline --passes 3 --resolution 50 --rotation-time 120
     #
     # With manual synchronization between passes:
-    # python prototype/test_protocol/1_Polar_Pattern.py --device 1 --passes 3 --resolution 50 --rotation-time 120 --wait-between-passes
+    # python prototype/test_protocol/2_DI_Noise.py --device 1 --passes 3 --resolution 50 --rotation-time 120 --wait-between-passes
     #
     # With manual synchronization and front directivity only:
-    # python prototype/test_protocol/1_Polar_Pattern.py --device 1 --passes 3 --resolution 30 --rotation-time 22.5 --wait-between-passes --quarter-rotation
+    # python prototype/test_protocol/2_DI_Noise.py --device 1 --passes 3 --resolution 30 --rotation-time 22.5 --wait-between-passes --quarter-rotation
