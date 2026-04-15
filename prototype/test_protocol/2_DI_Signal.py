@@ -113,12 +113,13 @@ def _parse_angle_list(raw_value: str) -> list[float]:
     return angles
 
 
-def test_polar_pattern(
+def test_di_signal(
     num_passes=1,
     angles=None,
     device_index=None,
     sample_duration=0.8,
-    output_dir='data/test_protocol/snr_signal',
+    output_dir='data/test_protocol/di_signal',
+    pattern=1,
     reference_angle=0,
     use_pipeline=True,
     wait_between_passes=False,
@@ -198,7 +199,7 @@ def test_polar_pattern(
     print(f"{'='*70}\n")
     
     # Setup logging
-    logger = logging.getLogger("SNRSignalTest")
+    logger = logging.getLogger("DISignalTest")
     logger.setLevel(logging.INFO)
     
     console_handler = logging.StreamHandler()
@@ -213,7 +214,20 @@ def test_polar_pattern(
         
         # Microphone array geometry (same source as realtime pipeline)
         mic_channel_numbers = [0, 1, 2, 3]
-        geometry_path = Path(__file__).resolve().parent.parent / "array_geometries" / "1_square.xml"
+        
+        if pattern == 1:
+            pattern = "1_square.xml"
+        
+        elif pattern == 2:
+            pattern = "2_corners.xml"
+            
+        elif pattern == 3:
+            pattern = "3_large.xml"
+            
+        else:
+            raise ValueError(f"Invalid pattern value: {pattern}. Must be 1, 2, or 3.")
+        
+        geometry_path = Path(__file__).resolve().parent.parent / "array_geometries" / pattern
         mic_positions = MVDRBeamformer.load_positions_from_xml(str(geometry_path))
         
         # MVDR Beamformer (same config as test_pipeline.py)
@@ -334,25 +348,20 @@ def test_polar_pattern(
     input("Warm-up complete. Press Enter to begin fixed-angle measurements...")
 
     print(f"Starting {num_passes}-pass fixed-angle measurements...")
+    print("For each angle: press Enter to record, Backspace to undo last measurement")
     print("Press Ctrl+C to stop early\n")
     
     try:
-        for pass_num in range(num_passes):
+        for angle_idx, angle_deg in enumerate(measurement_angles):
+            absolute_angle = (reference_angle + float(angle_deg)) % 360.0
             print(f"\n{'='*70}")
-            print(f"PASS {pass_num + 1}/{num_passes}")
+            print(f"ANGLE {angle_idx + 1}/{len(measurement_angles)}: {angle_deg:.1f}° (absolute {absolute_angle:.1f}°)")
             print(f"{'='*70}\n")
             
-            # Wait for user input before starting this pass (except for the first pass)
-            if wait_between_passes and pass_num > 0:
-                input(f"Press Enter to start pass {pass_num + 1}/{num_passes}...")
-                print()
-
-            for angle_idx, angle_deg in enumerate(measurement_angles):
-                absolute_angle = (reference_angle + float(angle_deg)) % 360.0
+            for pass_num in range(num_passes):
                 prompt = (
-                    f"  Set the source/array to {angle_deg:.1f}° "
-                    f"(absolute {absolute_angle:.1f}°) and press Enter to capture "
-                    f"[{angle_idx + 1}/{len(measurement_angles)}]..."
+                    f"  Pass {pass_num + 1}/{num_passes} at {angle_deg:.1f}°: "
+                    f"press Enter to record, Backspace to undo last... "
                 )
                 while True:
                     key_action = _wait_for_enter_or_backspace(prompt)
@@ -361,13 +370,14 @@ def test_polar_pattern(
                     if key_action == 'backspace':
                         if all_measurements:
                             removed_measurement = all_measurements.pop()
+                            removed_angle = removed_measurement.get('expected_angle', removed_measurement.get('angle_deg', 0.0))
+                            removed_pass = removed_measurement.get('pass_number', '?')
                             print(
-                                f"  Backspace detected: removed last measurement at "
-                                f"{removed_measurement.get('expected_angle', removed_measurement.get('angle_deg', 0.0)):.1f}°."
+                                f"  Backspace detected: removed last measurement (angle {removed_angle:.1f}°, pass {removed_pass})."
                             )
                         else:
                             print("  Backspace detected: no previous measurement to remove.")
-                        print("  Waiting for Enter to capture the next angle...\n")
+                        print(f"  Waiting for Enter to record pass {pass_num + 1}/{num_passes}...\n")
                         continue
 
                 try:
@@ -379,7 +389,7 @@ def test_polar_pattern(
                         blocking=True,
                     )
                 except Exception as e:
-                    logger.error(f"Error recording audio at angle {absolute_angle:.1f}°: {e}")
+                    logger.error(f"Error recording audio at angle {absolute_angle:.1f}°, pass {pass_num + 1}: {e}")
                     continue
 
                 audio_data = np.asarray(audio_data).astype(np.float32)
@@ -432,17 +442,10 @@ def test_polar_pattern(
                 all_measurements.append(measurement)
 
                 print(
-                    f"  Pass {pass_num + 1}, Angle {angle_idx + 1}/{len(measurement_angles)}: "
-                    f"base {float(angle_deg):6.1f}° | abs {absolute_angle:6.1f}° | "
+                    f"    ✓ Pass {pass_num + 1}/{num_passes} | "
                     f"Input: {input_rms_dbfs:7.2f} dBFS | Output: {rms_dbfs:7.2f} dBFS | "
                     f"Gain: {gain_db:+7.2f} dB"
                 )
-
-            else:
-                continue
-
-            print(f"  Pass {pass_num + 1} restarted before completion.")
-            continue
         
     except KeyboardInterrupt:
         print("\n\nMeasurement interrupted by user")
@@ -537,8 +540,7 @@ if __name__ == '__main__':
                         help='Comma-separated angle list in degrees (default fixed list)')
     parser.add_argument('--device', type=int, default=None,
                         help='Audio device index (default: system default input device)')
-    parser.add_argument('--list-devices', action='store_true',
-                        help='List available audio devices and exit')
+    
     parser.add_argument('--duration', type=float, default=0.8,
                         help='Audio sample duration in seconds (default: 0.8)')
     parser.add_argument('--output', type=str, default='data/test_protocol/snr_signal',
@@ -547,7 +549,7 @@ if __name__ == '__main__':
                         help='Initial microphone pointing direction (default: 0°)')
     parser.add_argument('--no-pipeline', action='store_true',
                         help='Disable processing pipeline, record raw audio only')
-    parser.add_argument('--wait-between-passes', action='store_true',
+    parser.add_argument('--wait-between-passes', type=bool, default=True,
                         help='Wait for Enter key before starting each new pass')
     parser.add_argument('--freeze-beamformer', action=argparse.BooleanOptionalAction, default=True,
                         help='Freeze beamformer steering during the full measurement run (default: enabled)')
@@ -561,28 +563,11 @@ if __name__ == '__main__':
                         help='Save partial data when interrupted by Ctrl+C (default: disabled)')
     
     args = parser.parse_args()
-    
-    if args.list_devices:
-        print("\nAvailable Audio Input Devices:")
-        print("=" * 70)
-        devices = sd.query_devices()
-        for i, dev in enumerate(devices):
-            try:
-                is_input = dev['max_input_channels'] > 0
-                channels = dev['max_input_channels']
-                samplerate = int(dev['default_samplerate'])
-                if is_input:
-                    default_marker = ' [DEFAULT INPUT]' if i == sd.default.device[0] else ''
-                    print(f"  {i:2d}: {dev['name']:<40} ({channels} channels, {samplerate} Hz){default_marker}")
-            except (IndexError, TypeError):
-                pass
-        print("=" * 70)
-        exit(0)
 
     angle_list = _parse_angle_list(args.angles)
     
     # Run test
-    test_polar_pattern(
+    test_di_signal(
         num_passes=args.passes,
         angles=angle_list,
         device_index=args.device,
@@ -600,17 +585,8 @@ if __name__ == '__main__':
     
     # Usage examples:
     #
-    # List available audio devices:
-    # python prototype/test_protocol/2_SNR_Signal.py --list-devices
-    #
     # Standard measurement with the fixed angle list:
-    # python prototype/test_protocol/2_SNR_Signal.py --device 1 --passes 3 --duration 0.8
+    # python prototype/test_protocol/2_DI_Signal.py --device 1 --passes 3 --duration 0.8
     #
     # Override the angle list if needed:
-    # python prototype/test_protocol/2_SNR_Signal.py --device 1 --angles 0,15,30,45,90,180,270,315,330,345
-    #
-    # Raw audio only (no processing pipeline):
-    # python prototype/test_protocol/2_SNR_Signal.py --device 1 --no-pipeline
-    #
-    # With manual synchronization between passes:
-    # python prototype/test_protocol/2_SNR_Signal.py --device 1 --passes 3 --wait-between-passes
+    # python prototype/test_protocol/2_DI_Signal.py --device 1 --angles 0,15,30,45,90,180,270,315,330,345
