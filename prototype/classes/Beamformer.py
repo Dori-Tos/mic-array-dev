@@ -220,6 +220,15 @@ class MVDRBeamformer(Beamformer):
     :param coherence_suppression_strength: Strength of diffuse noise suppression via coherence weighting (0–1).
         0.0 = no suppression (pure MVDR), 1.0 = maximum suppression (aggressive noise reduction).
         Default 0.5 balances directivity with speech preservation.
+    :param backward_null_strength: Strength of spatial null constraint at 180° (back diffraction suppression).
+        0.0 = disabled (pure MVDR with normal side-lobes at back).
+        0.5 = moderate back suppression via MVDR null constraint (default).
+        1.0 = aggressive null at 180°, strong back diffraction rejection.
+        Recommendation: Use 0.5–0.8 to suppress back diffraction without over-constraining the beamformer.
+        
+        Implementation: Null-constrained MVDR that projects out any weight component pointing toward 180°
+        while maintaining distortionless response at the steering angle. This is particularly effective
+        at low frequencies where diffraction causes significant back lobes.
     """
     def __init__(
         self, logger: logging.Logger,
@@ -234,6 +243,7 @@ class MVDRBeamformer(Beamformer):
         weight_smooth_alpha_min: float = 0.45,
         weight_smooth_alpha_max: float = 0.82,
         snr_threshold_for_sharpening: float = 2.0,
+        backward_null_strength: float = 0.5,
     ):
         super().__init__(
             logger=logger,
@@ -261,6 +271,8 @@ class MVDRBeamformer(Beamformer):
             raise ValueError("weight_smooth_alpha_min must be <= weight_smooth_alpha_max < 1.0")
         if snr_threshold_for_sharpening <= 0:
             raise ValueError("snr_threshold_for_sharpening must be > 0")
+        if not 0.0 <= backward_null_strength <= 1.0:
+            raise ValueError("backward_null_strength must be in [0, 1]")
 
         self.covariance_alpha = float(covariance_alpha)
         self.diagonal_loading = float(diagonal_loading)
@@ -271,6 +283,7 @@ class MVDRBeamformer(Beamformer):
         self.snr_threshold_for_sharpening = float(snr_threshold_for_sharpening)  # Transition point
         self.max_adaptive_loading_scale = float(max_adaptive_loading_scale)
         self.coherence_suppression_strength = float(coherence_suppression_strength)
+        self.backward_null_strength = float(backward_null_strength)  # Null suppression at 180°
         self._covariance: np.ndarray | None = None
         self._prev_weights: np.ndarray | None = None
         self._power_iteration_vec: np.ndarray | None = None
@@ -419,6 +432,56 @@ class MVDRBeamformer(Beamformer):
         # Clip to [0, 1] range
         return np.clip(avg_coherence, 0.0, 1.0)
 
+    def _apply_backward_null_constraint(self, weights: np.ndarray, steering: np.ndarray, 
+                                       theta_rad: float) -> np.ndarray:
+        """
+        Apply spatial null constraint at 180° (opposite direction) to suppress back diffraction.
+        
+        Implementation: Project weights orthogonal to the backward steering vector, forcing a null
+        in the backward direction while maintaining distortionless response at the main steering angle.
+        
+        :param weights: MVDR weights of shape (freq_bins, num_mics)
+        :param steering: Forward steering vector of shape (freq_bins, num_mics)
+        :param theta_rad: Steering angle in radians
+        :return: Backward null-constrained weights of shape (freq_bins, num_mics)
+        """
+        freq_bins = weights.shape[0]
+        
+        # Compute backward steering vector (180° opposite)
+        backward_theta_rad = theta_rad + np.pi
+        
+        # Backward direction as a simple formula: negate the forward direction vector
+        backward_steering = -steering  # Equivalent to steering at theta + 180°
+        
+        # For each frequency bin, project out the backward component
+        # This forces the null constraint: minimize response at 180° while preserving response at theta
+        weights_constrained = weights.copy()
+        
+        for f in range(freq_bins):
+            w = weights[f, :]
+            a_back = backward_steering[f, :]  # Backward steering vector at this frequency
+            
+            # Projection coefficient: how much does w point in the backward direction?
+            numerator = np.abs(np.vdot(a_back, w)) ** 2
+            denominator = np.abs(np.vdot(a_back, a_back)) + self._eps
+            
+            # Project out the backward component with strength control
+            # strength=0: no projection (normal MVDR)
+            # strength=1: full projection (maximum null)
+            projection_coeff = (self.backward_null_strength * numerator) / denominator
+            
+            # Updated weights: remove backward component
+            weights_constrained[f, :] = w - projection_coeff * a_back
+        
+        # Re-normalize to maintain distortionless response at steering angle
+        # Recompute gain to preserve amplitude at steered direction
+        denom = np.einsum("fi,fi->f", np.conj(steering), weights_constrained, optimize=True)
+        valid = np.abs(denom) > self._eps
+        weights_constrained[valid] = weights_constrained[valid] / denom[valid, None]
+        weights_constrained[~valid] = 1.0 / self.channel_count
+        
+        return weights_constrained
+
     def process(self, block: np.ndarray, theta_deg: float) -> np.ndarray:
         selected = self._select_channels(np.asarray(block, dtype=np.float64))
         n_samples = selected.shape[0]
@@ -476,6 +539,11 @@ class MVDRBeamformer(Beamformer):
         weights[valid_smooth] = weights[valid_smooth] / smooth_denom[valid_smooth, None]
         weights[~valid_smooth] = 1.0 / self.channel_count
         self._prev_weights = weights.copy()
+
+        # BACKWARD NULL CONSTRAINT: Suppress back diffraction at 180° (particularly effective at low frequencies).
+        # This targets the physical problem of open-backed MEMS arrays where diffraction creates large back lobes.
+        if self.backward_null_strength > self._eps:
+            weights = self._apply_backward_null_constraint(weights, steering, theta_rad)
 
         # COHERENCE-BASED SIDELOBE SUPPRESSION: Suppress diffuse noise while preserving main source
         # Compute inter-channel coherence (0=diffuse, 1=coherent point-source)
