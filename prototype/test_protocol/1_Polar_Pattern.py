@@ -112,6 +112,7 @@ def test_polar_pattern(
     enable_agc=False,
     enable_spectral_filter=True,
     save_on_interrupt=False,
+    process_block_ms=20.0,
 ):
     """
     Measure microphone array polar pattern using the complete processing pipeline.
@@ -152,6 +153,9 @@ def test_polar_pattern(
         enable_spectral_filter: If True, enable SpectralSubtractionFilter (default True).
         save_on_interrupt: If True, save partial data when interrupted by Ctrl+C.
                   Default False to avoid saving incomplete measurements.
+        process_block_ms: Chunk size (ms) used to apply the realtime processing chain.
+                  This is important for overlap-add filters (spectral subtraction) so that
+                  offline processing matches realtime behavior and does not smear across angles.
     
     Returns:
         DataFrame with averaged measurements
@@ -184,7 +188,13 @@ def test_polar_pattern(
     
     # Use 4 channels for array processing; keep single-channel raw mode.
     num_channels = 4 if use_pipeline else 1
-    
+
+    # Process captured audio using short, fixed-size blocks so overlap-add filters behave like realtime.
+    process_block_ms = float(process_block_ms)
+    process_block_samples = int(max(32, round((process_block_ms / 1000.0) * sample_rate)))
+    capture_samples = int(max(1, round(sample_duration * sample_rate)))
+    process_block_samples = int(min(process_block_samples, capture_samples))
+
     print(f"\n{'='*70}")
     print(f"Polar Pattern Test Protocol Configuration:")
     print(f"{'='*70}")
@@ -204,6 +214,8 @@ def test_polar_pattern(
     print(f"  Turntable speed: {seconds_per_rotation} seconds/full rotation (adjusted for {total_degrees}° range)")
     print(f"  Measurement interval: {interval:.2f} seconds")
     print(f"  Sample duration: {sample_duration} seconds")
+    if use_pipeline:
+        print(f"  Processing chunk: {process_block_ms:.1f} ms ({process_block_samples} samples)")
     print(f"  Rotation direction: {rotation_direction}")
     print(f"  Alternate direction each pass: {'ON' if alternate_rotation_direction else 'OFF'}")
     print(f"  Microphone reference angle: {reference_angle}°")
@@ -342,6 +354,56 @@ def test_polar_pattern(
         beamformer = None
         filters = []
         agc = None
+
+    def _process_capture_block(audio_block: np.ndarray) -> np.ndarray:
+        """Process a captured audio block using short chunks to mimic realtime processing."""
+        audio_block = np.asarray(audio_block, dtype=np.float32)
+
+        if not use_pipeline:
+            if audio_block.ndim == 2 and audio_block.shape[1] > 0:
+                return np.asarray(audio_block[:, 0], dtype=np.float32).reshape(-1)
+            return np.asarray(audio_block, dtype=np.float32).reshape(-1)
+
+        if audio_block.ndim != 2:
+            raise ValueError("Expected audio block with shape (samples, channels) when use_pipeline=True")
+
+        if process_block_samples <= 0 or audio_block.shape[0] <= process_block_samples:
+            out = apply_realtime_processing_chain(
+                block=audio_block,
+                beamformer=beamformer,
+                filters=filters,
+                agc=agc,
+                sample_rate=sample_rate,
+                monitor_gain=1.0,
+                theta_deg=0.0,
+                freeze_beamformer=bool(freeze_beamformer),
+                freeze_angle_deg=float(freeze_angle_deg) if freeze_angle_deg is not None else None,
+            )
+            return np.asarray(out, dtype=np.float32).reshape(-1)
+
+        out_chunks: list[np.ndarray] = []
+        n = audio_block.shape[0]
+        for start in range(0, n, process_block_samples):
+            chunk = audio_block[start:start + process_block_samples, :]
+            if chunk.shape[0] == 0:
+                continue
+            out = apply_realtime_processing_chain(
+                block=chunk,
+                beamformer=beamformer,
+                filters=filters,
+                agc=agc,
+                sample_rate=sample_rate,
+                monitor_gain=1.0,
+                theta_deg=0.0,
+                freeze_beamformer=bool(freeze_beamformer),
+                freeze_angle_deg=float(freeze_angle_deg) if freeze_angle_deg is not None else None,
+            )
+            out_chunks.append(np.asarray(out, dtype=np.float32).reshape(-1))
+
+        if not out_chunks:
+            return np.zeros(0, dtype=np.float32)
+
+        return np.concatenate(out_chunks)
     
     # Storage for all measurements across all passes
     all_measurements = []
@@ -356,24 +418,21 @@ def test_polar_pattern(
         settling_samples = int(settling_duration * sample_rate)
         print(f"Settling filters and beamformer for {settling_duration:.1f}s...")
         
-        # Simple blocking recording for settling - discarded, just settles the filters
-        settling_audio = sd.rec(settling_samples, samplerate=sample_rate, channels=num_channels, device=device_index)
-        sd.wait()
-        
-        # Process through pipeline to settle filters (discard output)
+        # Blocking recording for settling - discarded, just settles the pipeline.
+        settling_audio = sd.rec(
+            settling_samples,
+            samplerate=sample_rate,
+            channels=num_channels,
+            device=device_index,
+            dtype='float32',
+            blocking=True,
+        )
+
+        # Process through pipeline to settle filters (discard output).
+        # IMPORTANT: apply in small chunks so overlap-add filters behave like realtime.
         if use_pipeline:
             try:
-                _ = apply_realtime_processing_chain(
-                    block=settling_audio,
-                    beamformer=beamformer,
-                    filters=filters,
-                    agc=agc,
-                    sample_rate=sample_rate,
-                    monitor_gain=1.0,
-                    theta_deg=0.0,
-                    freeze_beamformer=bool(freeze_beamformer),
-                    freeze_angle_deg=float(freeze_angle_deg) if freeze_angle_deg is not None else None,
-                )
+                _ = _process_capture_block(settling_audio)
             except Exception as e:
                 print(f"Warning during settling: {e}")
         
@@ -386,7 +445,7 @@ def test_polar_pattern(
     
     print(f"Starting {num_passes}-pass polar pattern measurements...")
     print("Press Ctrl+C to stop early")
-    print("NOTE: Audio stream will remain CONTINUOUSLY OPEN between passes (no interruption)")
+    print("NOTE: Audio capture runs in blocking segments; pipeline state is preserved between captures.")
     print()
     
     # Track whether measurements were interrupted
@@ -416,7 +475,7 @@ def test_polar_pattern(
                     # Time-based synchronization: angle is derived from real elapsed time,
                     # with edge-padding captures before/after the in-range window.
                     pass_measurement_start_idx = len(all_measurements)
-                    pass_start_time = time.time()
+                    pass_start_time = time.perf_counter()
                     pass_end_time = pass_start_time + pass_duration_padded
                     next_measurement_time = pass_start_time
                     meas_idx = 0
@@ -427,11 +486,11 @@ def test_polar_pattern(
                             rollback_requested = True
                             break
 
-                        now = time.time()
+                        now = time.perf_counter()
                         if now >= pass_end_time:
                             break
 
-                        # Time-pace measurements to maintain rotation synchronization
+                        # Time-pace measurements to maintain rotation synchronization (monotonic clock)
                         time_to_wait = next_measurement_time - now
                         while time_to_wait > 0:
                             if _consume_backspace_request():
@@ -439,14 +498,33 @@ def test_polar_pattern(
                                 break
                             sleep_chunk = min(0.05, time_to_wait)
                             time.sleep(sleep_chunk)
-                            time_to_wait = next_measurement_time - time.time()
+                            time_to_wait = next_measurement_time - time.perf_counter()
                         if rollback_requested:
                             break
 
-                        # Record measurement time for angle calculation (synchronized with turntable)
-                        measurement_time = time.time()
-                        elapsed_since_pass_start = np.clip(measurement_time - pass_start_time, 0.0, pass_duration_padded)
-                        
+                        # Record audio (blocking) and derive the measurement angle from the capture midpoint.
+                        capture_start = time.perf_counter()
+                        try:
+                            audio_data = sd.rec(
+                                capture_samples,
+                                samplerate=sample_rate,
+                                channels=num_channels,
+                                device=device_index,
+                                dtype='float32',
+                                blocking=True,
+                            )
+                        except Exception as e:
+                            logger.error(f"Error recording audio: {e}")
+                            continue
+                        capture_end = time.perf_counter()
+
+                        if _consume_backspace_request():
+                            rollback_requested = True
+                            break
+
+                        capture_mid = 0.5 * (capture_start + capture_end)
+                        elapsed_since_pass_start = max(0.0, min(capture_mid - pass_start_time, pass_duration_padded))
+
                         # Calculate angle based on elapsed time from pass start (turntable rotation)
                         logical_ccw = (-edge_padding_points * degrees_per_measurement) + (elapsed_since_pass_start * speed_deg_per_sec)
                         if pass_rotation_direction == 'counterclockwise':
@@ -455,44 +533,22 @@ def test_polar_pattern(
                             relative_angle = total_degrees - logical_ccw
                         expected_angle = (reference_angle + relative_angle) % 360
 
-                        # Record audio synchronously
-                        sample_count = int(sample_duration * sample_rate)
-                        try:
-                            audio_data = sd.rec(sample_count, samplerate=sample_rate, channels=num_channels, device=device_index)
-                            sd.wait()  # Wait for recording to complete
-                        except Exception as e:
-                            logger.error(f"Error recording audio at angle {expected_angle:.1f}°: {e}")
-                            continue
-
-                        if _consume_backspace_request():
-                            rollback_requested = True
-                            break
-
                         # Ensure audio is float32 and normalized
-                        audio_data = np.asarray(audio_data).astype(np.float32)
-                        max_val = np.max(np.abs(audio_data))
+                        audio_data = np.asarray(audio_data, dtype=np.float32)
+                        max_val = float(np.max(np.abs(audio_data))) if audio_data.size else 0.0
                         if max_val > 1.0:
                             audio_data = audio_data / max_val
 
                         # Apply processing pipeline (filters retain learned state from settling phase)
                         if use_pipeline:
-                            processed_audio = apply_realtime_processing_chain(
-                                block=audio_data,
-                                beamformer=beamformer,
-                                filters=filters,
-                                agc=agc,
-                                sample_rate=sample_rate,
-                                monitor_gain=1.0,
-                                theta_deg=0.0,
-                                freeze_beamformer=bool(freeze_beamformer),
-                                freeze_angle_deg=float(freeze_angle_deg) if freeze_angle_deg is not None else None,
-                            )
+                            processed_audio = _process_capture_block(audio_data)
                         else:
-                            processed_audio = np.asarray(audio_data[:, 0], dtype=np.float32)
+                            processed_audio = np.asarray(audio_data[:, 0], dtype=np.float32).reshape(-1)
 
+                        processed_audio = np.asarray(processed_audio, dtype=np.float32).reshape(-1)
                         # Calculate RMS and peak levels
-                        rms_level = np.sqrt(np.mean(processed_audio ** 2))
-                        peak_level = np.max(np.abs(processed_audio))
+                        rms_level = float(np.sqrt(np.mean(processed_audio ** 2))) if processed_audio.size else 0.0
+                        peak_level = float(np.max(np.abs(processed_audio))) if processed_audio.size else 0.0
 
                         # Store measurement
                         measurement = {
@@ -673,8 +729,8 @@ if __name__ == '__main__':
                         help='Initial microphone pointing direction (default: 0°)')
     parser.add_argument('--no-pipeline', action='store_true',
                         help='Disable processing pipeline, record raw audio only')
-    parser.add_argument('--wait-between-passes', type=bool, default=True,
-                        help='Wait for Enter key before starting each new pass (default: True)')
+    parser.add_argument('--wait-between-passes', action=argparse.BooleanOptionalAction, default=False,
+                        help='Wait for Enter key before starting each new pass (default: disabled)')
     parser.add_argument('--quarter-rotation', action='store_true',
                         help='Measure only front 90° instead of full 360° (useful for measuring front directivity and mirroring afterwards)')
     parser.add_argument('--half-rotation', action='store_true',
@@ -689,8 +745,10 @@ if __name__ == '__main__':
                         help='Steering angle used when beamformer freeze is enabled (default: 0.0)')
     parser.add_argument('--enable-agc', action=argparse.BooleanOptionalAction, default=False,
                         help='Enable both AGC stages (AdaptiveAmplifier + PedalboardAGC). DISABLED by default for directivity measurements to isolate beamformer performance. Enable only to test end-to-end system behavior.')
-    parser.add_argument('--enable-spectral-filter', type=bool, default=True,
+    parser.add_argument('--enable-spectral-filter', action=argparse.BooleanOptionalAction, default=True,
                         help='Enable spectral subtraction filter (default: enabled)')
+    parser.add_argument('--process-block-ms', type=float, default=20.0,
+                        help='Processing chunk size in milliseconds used to apply the realtime processing chain (default: 20.0).')
     parser.add_argument('--save-on-interrupt', action=argparse.BooleanOptionalAction, default=False,
                         help='Save partial data when interrupted by Ctrl+C (default: disabled)')
     
@@ -734,6 +792,7 @@ if __name__ == '__main__':
         enable_agc=args.enable_agc,
         enable_spectral_filter=args.enable_spectral_filter,
         save_on_interrupt=args.save_on_interrupt,
+        process_block_ms=args.process_block_ms,
     )
     
     # Usage examples:
