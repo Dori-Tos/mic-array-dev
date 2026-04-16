@@ -439,13 +439,14 @@ def test_polar_pattern(
             latency='low'
         )
         stream.start()
-        stream_start_time = time.time()  # CRITICAL: Record when stream opened for absolute timing
         print("Stream opened and running continuously.")
         # Pre-fill the circular buffer before starting measurements
         # This ensures we don't wait for each first measurement
         prefill_duration = sample_duration + 0.5  # Ensure buffer has more than one measurement window ready
         print(f"Pre-filling buffer for {prefill_duration:.1f}s...")
         time.sleep(prefill_duration)
+        # CRITICAL: Record stream start time AFTER pre-fill, so all measurements reference a pre-filled buffer
+        stream_start_time = time.time()
         print()
     except Exception as e:
         print(f"ERROR: Failed to open continuous audio stream: {e}")
