@@ -439,6 +439,7 @@ def test_polar_pattern(
             latency='low'
         )
         stream.start()
+        stream_start_time = time.time()  # CRITICAL: Record when stream opened for absolute timing
         print("Stream opened and running continuously.\n")
         time.sleep(0.5)  # Brief pause to ensure stream is filling buffer
     except Exception as e:
@@ -508,12 +509,11 @@ def test_polar_pattern(
 
                         # Extract audio sample from continuous stream buffer using proper circular buffer math
                         now_for_extract = time.time()
-                        elapsed_for_extract = np.clip(now_for_extract - pass_start_time, 0.0, pass_duration_padded)
                         
-                        # Absolute sample index since stream started (after warmup)
-                        # test_elapsed = time since stream opened + time into current pass
-                        test_elapsed = elapsed_for_extract
-                        abs_sample_idx = int(test_elapsed * sample_rate)
+                        # CRITICAL: Use ABSOLUTE elapsed time since stream opened, not relative to pass start
+                        # This ensures consistent indexing into the circular buffer across all passes
+                        absolute_elapsed = now_for_extract - stream_start_time
+                        abs_sample_idx = int(absolute_elapsed * sample_rate)
                         abs_end_idx = abs_sample_idx + int(sample_duration * sample_rate)
                         
                         # Ensure we're not trying to read from the future
