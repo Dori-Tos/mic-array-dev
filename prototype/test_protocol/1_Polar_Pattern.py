@@ -539,31 +539,35 @@ def test_polar_pattern(
                         # Extract audio sample from continuous stream buffer using proper circular buffer math
                         now_for_extract = time.time()
                         
-                        # CRITICAL: Use ABSOLUTE elapsed time since stream opened, not relative to pass start
-                        # This ensures consistent indexing into the circular buffer across all passes
-                        absolute_elapsed = now_for_extract - stream_start_time
-                        abs_sample_idx = int(absolute_elapsed * sample_rate)
-                        abs_end_idx = abs_sample_idx + int(sample_duration * sample_rate)
-                        
-                        # Ensure we're not trying to read from the future
+                        # Extract the most recent sample_duration of audio from the buffer
+                        # The circular buffer fills continuously: we grab the freshest data available
+                        # This avoids timing mismatches - we always get the "latest" audio regardless of latency
                         total_written = stream_total_samples_written[0]
-                        if abs_end_idx > total_written:
-                            # Wait for buffer to fill (shouldn't happen often with 10s buffer)
-                            time_to_wait = (abs_end_idx - total_written) / sample_rate + 0.05
-                            logger.warning(f"Measurement window not yet available. Waiting {time_to_wait:.3f}s for buffer to fill...")
-                            time.sleep(time_to_wait)
+                        sample_range = int(sample_duration * sample_rate)
+                        
+                        # Ensure buffer has at least one full sample_duration of data
+                        if total_written < sample_range:
+                            time_to_wait = (sample_range - total_written) / sample_rate + 0.05
+                            logger.warning(f"Buffer not yet full. Waiting {time_to_wait:.3f}s for audio to accumulate...")
+                            while stream_total_samples_written[0] < sample_range:
+                                time.sleep(0.01)
+                            total_written = stream_total_samples_written[0]
                         
                         # Check for stream errors
                         if stream_error_flag[0]:
                             logger.error(f"Audio stream error detected. Aborting measurement.")
                             break
                         
+                        # Extract the most recent sample_range samples from the buffer
+                        extract_end_idx = total_written  # Most recent sample written
+                        extract_start_idx = total_written - sample_range  # sample_range samples ago
+                        
+                        # Map to circular buffer positions
+                        start_circ = extract_start_idx % stream_buffer_size
+                        end_circ = extract_end_idx % stream_buffer_size
+                        
                         # Extract from circular buffer, handling wrap-around
                         try:
-                            sample_range = int(sample_duration * sample_rate)
-                            start_circ = abs_sample_idx % stream_buffer_size
-                            end_circ = (abs_sample_idx + sample_range) % stream_buffer_size
-                            
                             if start_circ < end_circ:
                                 # No wrap-around, simple extract
                                 audio_data = stream_buffer[start_circ:end_circ].copy()
