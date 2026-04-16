@@ -349,122 +349,39 @@ def test_polar_pattern(
     # Get timestamp for this test run
     test_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     
-    # Continuous streaming setup: keep audio pipeline alive throughout all passes
-    # Use a smaller circular buffer (~10 seconds) to avoid huge memory allocation
-    # The callback continuously fills this, and we extract windowed samples from it
-    stream_buffer_duration = 10.0  # Keep 10 seconds of audio in the circular buffer
-    stream_buffer_size = int(stream_buffer_duration * sample_rate)
-    stream_buffer = np.zeros((stream_buffer_size, num_channels), dtype=np.float32)
-    
-    # Track total samples written (never wraps, only grows)
-    stream_total_samples_written = [0]  # Mutable container
-    stream_error_flag = [False]
-    
-    def stream_callback(indata, frames, time_obj, status):
-        """Callback that continuously fills the circular buffer with incoming audio."""
-        if status:
-            print(f"Stream callback warning: {status}")
-        
-        try:
-            # Get current write position in circular buffer
-            total_written = stream_total_samples_written[0]
-            write_pos_circular = total_written % stream_buffer_size
-            
-            # Handle wrap-around when writing to circular buffer
-            if write_pos_circular + frames <= stream_buffer_size:
-                # No wrap - fits in one segment
-                stream_buffer[write_pos_circular:write_pos_circular + frames] = indata[:frames]
-            else:
-                # Wrap-around - split into two segments
-                first_part = stream_buffer_size - write_pos_circular
-                stream_buffer[write_pos_circular:] = indata[:first_part]
-                stream_buffer[:frames - first_part] = indata[first_part:frames]
-            
-            # Update total samples written
-            stream_total_samples_written[0] += frames
-            
-        except Exception as e:
-            print(f"Stream callback error: {e}")
-            stream_error_flag[0] = True
-    
-    # Start continuous input stream that will run throughout all passes
-    print(f"Opening continuous audio stream...")
+    # Settling phase: Let filters equilibrate with source audio
+    print(f"Opening audio stream for filter settling...")
     try:
-        stream = sd.InputStream(
-            channels=num_channels,
-            samplerate=sample_rate,
-            device=device_index,
-            blocksize=int(sample_rate * 0.1),  # 100ms blocks
-            callback=stream_callback,
-            latency='low'
-        )
-        stream.start()
-        print("Stream opened and running continuously.")
+        settling_duration = 20.0  # 20 seconds to stabilize MVDR, spectral subtraction, AGC
+        settling_samples = int(settling_duration * sample_rate)
+        print(f"Settling filters and beamformer for {settling_duration:.1f}s...")
         
-        # CRITICAL: Record stream start time IMMEDIATELY when stream opens
-        # All measurements reference elapsed time from this moment
-        stream_start_time = time.time()
+        # Simple blocking recording for settling - discarded, just settles the filters
+        settling_audio = sd.rec(settling_samples, samplerate=sample_rate, channels=num_channels, device=device_index)
+        sd.wait()
         
-        # CRITICAL SETTLING PHASE: Extract and process data through the pipeline to settle filters
-        # This lets the beamformer and filters equilibrate in the streaming context BEFORE measurements
-        settling_duration = 20.0  # Settling: 20 seconds to stabilize MVDR, spectral subtraction, AGC
-        print(f"Settling filters and beamformer for {settling_duration:.1f}s (processing data through pipeline)...")
-        settling_samples_needed = int(settling_duration * sample_rate)
-        settling_samples_processed = 0
-        
-        while settling_samples_processed < settling_samples_needed:
-            now = time.time()
-            # Use absolute elapsed time from stream_start_time
-            absolute_elapsed = now - stream_start_time
-            abs_sample_idx = int(absolute_elapsed * sample_rate)
-            abs_end_idx = abs_sample_idx + int(sample_duration * sample_rate)
-            
-            # Extract audio from circular buffer
-            start_circ = abs_sample_idx % stream_buffer_size
-            end_circ = (abs_sample_idx + int(sample_duration * sample_rate)) % stream_buffer_size
-            
-            if start_circ < end_circ:
-                audio_data = stream_buffer[start_circ:end_circ].copy()
-            else:
-                # Wrap-around extraction
-                part1 = stream_buffer[start_circ:].copy()
-                part2 = stream_buffer[:end_circ].copy()
-                audio_data = np.vstack([part1, part2])
-            
-            # Process through pipeline WITHOUT saving
-            if use_pipeline and audio_data.size > 0:
-                try:
-                    _ = apply_realtime_processing_chain(
-                        block=audio_data,
-                        beamformer=beamformer,
-                        filters=filters,
-                        agc=agc,
-                        sample_rate=sample_rate,
-                        monitor_gain=1.0,
-                        theta_deg=0.0,
-                        freeze_beamformer=bool(freeze_beamformer),
-                        freeze_angle_deg=float(freeze_angle_deg) if freeze_angle_deg is not None else None,
-                    )
-                except Exception as e:
-                    print(f"  Settling phase warning: {e}")
-            
-            settling_samples_processed += int(sample_duration * sample_rate)
-            time.sleep(sample_duration * 0.5)  # Don't hammer the buffer
+        # Process through pipeline to settle filters (discard output)
+        if use_pipeline:
+            try:
+                _ = apply_realtime_processing_chain(
+                    block=settling_audio,
+                    beamformer=beamformer,
+                    filters=filters,
+                    agc=agc,
+                    sample_rate=sample_rate,
+                    monitor_gain=1.0,
+                    theta_deg=0.0,
+                    freeze_beamformer=bool(freeze_beamformer),
+                    freeze_angle_deg=float(freeze_angle_deg) if freeze_angle_deg is not None else None,
+                )
+            except Exception as e:
+                print(f"Warning during settling: {e}")
         
         print("Pipeline settled.")
         input("Press Enter when turntable is at 0° and ready to start rotating...")
-        
-        # CRITICAL: Clear the circular buffer to discard all settling data
-        # The old settling audio is useless for measurements - discard it entirely
-        stream_buffer.fill(0)
-        stream_total_samples_written[0] = 0
-        
-        # CRITICAL: Reset stream_start_time NOW so measurements reference elapsed time from this point
-        # with a fresh circular buffer containing only measurement data
-        stream_start_time = time.time()
-        print("Circular buffer cleared. Starting with fresh audio data.\n")
+        print()
     except Exception as e:
-        print(f"ERROR: Failed to open continuous audio stream: {e}")
+        print(f"ERROR: Failed during settling phase: {e}")
         return None
     
     print(f"Starting {num_passes}-pass polar pattern measurements...")
@@ -514,7 +431,7 @@ def test_polar_pattern(
                         if now >= pass_end_time:
                             break
 
-                        # Keep capture starts roughly paced by requested interval when possible.
+                        # Time-pace measurements to maintain rotation synchronization
                         time_to_wait = next_measurement_time - now
                         while time_to_wait > 0:
                             if _consume_backspace_request():
@@ -526,71 +443,38 @@ def test_polar_pattern(
                         if rollback_requested:
                             break
 
-                        # Preview angle (for logging/errors) based on current elapsed time.
-                        now_for_angle = time.time()
-                        elapsed_preview = np.clip(now_for_angle - pass_start_time, 0.0, pass_duration_padded)
-                        logical_ccw_preview = (-edge_padding_points * degrees_per_measurement) + (elapsed_preview * speed_deg_per_sec)
+                        # Record measurement time for angle calculation (synchronized with turntable)
+                        measurement_time = time.time()
+                        elapsed_since_pass_start = np.clip(measurement_time - pass_start_time, 0.0, pass_duration_padded)
+                        
+                        # Calculate angle based on elapsed time from pass start (turntable rotation)
+                        logical_ccw = (-edge_padding_points * degrees_per_measurement) + (elapsed_since_pass_start * speed_deg_per_sec)
                         if pass_rotation_direction == 'counterclockwise':
-                            relative_angle_preview = logical_ccw_preview
+                            relative_angle = logical_ccw
                         else:
-                            relative_angle_preview = total_degrees - logical_ccw_preview
-                        expected_angle_preview = (reference_angle + relative_angle_preview) % 360
+                            relative_angle = total_degrees - logical_ccw
+                        expected_angle = (reference_angle + relative_angle) % 360
 
-                        # Extract audio sample from continuous stream buffer using proper circular buffer math
-                        now_for_extract = time.time()
-                        
-                        # Extract the most recent sample_duration of audio from the buffer
-                        # The circular buffer fills continuously: we grab the freshest data available
-                        # This avoids timing mismatches - we always get the "latest" audio regardless of latency
-                        total_written = stream_total_samples_written[0]
-                        sample_range = int(sample_duration * sample_rate)
-                        
-                        # Ensure buffer has at least one full sample_duration of data
-                        if total_written < sample_range:
-                            time_to_wait = (sample_range - total_written) / sample_rate + 0.05
-                            logger.warning(f"Buffer not yet full. Waiting {time_to_wait:.3f}s for audio to accumulate...")
-                            while stream_total_samples_written[0] < sample_range:
-                                time.sleep(0.01)
-                            total_written = stream_total_samples_written[0]
-                        
-                        # Check for stream errors
-                        if stream_error_flag[0]:
-                            logger.error(f"Audio stream error detected. Aborting measurement.")
-                            break
-                        
-                        # Extract the most recent sample_range samples from the buffer
-                        extract_end_idx = total_written  # Most recent sample written
-                        extract_start_idx = total_written - sample_range  # sample_range samples ago
-                        
-                        # Map to circular buffer positions
-                        start_circ = extract_start_idx % stream_buffer_size
-                        end_circ = extract_end_idx % stream_buffer_size
-                        
-                        # Extract from circular buffer, handling wrap-around
+                        # Record audio synchronously
+                        sample_count = int(sample_duration * sample_rate)
                         try:
-                            if start_circ < end_circ:
-                                # No wrap-around, simple extract
-                                audio_data = stream_buffer[start_circ:end_circ].copy()
-                            else:
-                                # Wrap-around case: combine two segments
-                                part1 = stream_buffer[start_circ:].copy()
-                                part2 = stream_buffer[:end_circ].copy()
-                                audio_data = np.vstack([part1, part2])
+                            audio_data = sd.rec(sample_count, samplerate=sample_rate, channels=num_channels, device=device_index)
+                            sd.wait()  # Wait for recording to complete
                         except Exception as e:
-                            logger.error(f"Error extracting audio from stream buffer at angle {expected_angle_preview:.1f}°: {e}")
+                            logger.error(f"Error recording audio at angle {expected_angle:.1f}°: {e}")
                             continue
 
                         if _consume_backspace_request():
                             rollback_requested = True
                             break
 
-                        # Ensure audio is float32 and normalized to [-1, 1]
+                        # Ensure audio is float32 and normalized
                         audio_data = np.asarray(audio_data).astype(np.float32)
                         max_val = np.max(np.abs(audio_data))
                         if max_val > 1.0:
                             audio_data = audio_data / max_val
 
-                        # Apply processing pipeline using the shared Array_RealTime chain helper
+                        # Apply processing pipeline (filters retain learned state from settling phase)
                         if use_pipeline:
                             processed_audio = apply_realtime_processing_chain(
                                 block=audio_data,
@@ -610,17 +494,6 @@ def test_polar_pattern(
                         rms_level = np.sqrt(np.mean(processed_audio ** 2))
                         peak_level = np.max(np.abs(processed_audio))
 
-                        # Compute expected angle from elapsed real time at the CENTER of the capture window.
-                        # This keeps angle labels synchronized with turntable motion even under load.
-                        capture_mid_time = time.time() - (sample_duration * 0.5)
-                        elapsed = np.clip(capture_mid_time - pass_start_time, 0.0, pass_duration_padded)
-                        logical_ccw = (-edge_padding_points * degrees_per_measurement) + (elapsed * speed_deg_per_sec)
-                        if pass_rotation_direction == 'counterclockwise':
-                            relative_angle = logical_ccw
-                        else:
-                            relative_angle = total_degrees - logical_ccw
-                        expected_angle = (reference_angle + relative_angle) % 360
-
                         # Store measurement
                         measurement = {
                             'measurement_index': len(all_measurements),
@@ -632,15 +505,14 @@ def test_polar_pattern(
                             'rms_level': rms_level,
                             'peak_level': peak_level,
                         }
-
                         all_measurements.append(measurement)
 
-                        # Progress indicator for every measurement so the cadence matches the resolution.
+                        # Progress output
                         print(f"  Pass {pass_num + 1}, Measurement {meas_idx + 1}/{padded_resolution}: "
                             f"Angle: {expected_angle:6.1f}° (rel {relative_angle:6.1f}°) | RMS: {20*np.log10(max(rms_level, 1e-10)):7.2f} dB | "
-                                f"Peak: {20*np.log10(max(peak_level, 1e-10)):7.2f} dB")
+                            f"Peak: {20*np.log10(max(peak_level, 1e-10)):7.2f} dB")
 
-                        # Schedule next measurement from absolute timeline, not loop execution time.
+                        # Schedule next measurement
                         next_measurement_time += interval
                         meas_idx += 1
 
@@ -648,16 +520,10 @@ def test_polar_pattern(
                         removed = len(all_measurements) - pass_measurement_start_idx
                         if removed > 0:
                             del all_measurements[pass_measurement_start_idx:]
-                        print(
-                            f"  Backspace detected: rolled back pass {pass_num + 1} "
-                            f"(removed {removed} measurements)."
-                        )
+                        print(f"  Backspace detected: rolled back {removed} measurements.")
                     else:
                         if meas_idx < padded_resolution:
-                            print(
-                                f"  Pass {pass_num + 1}: captured {meas_idx}/{padded_resolution} samples before padded rotation window ended "
-                                f"({pass_duration_padded:.2f}s)."
-                            )
+                            print(f"  Pass {pass_num + 1}: captured {meas_idx}/{padded_resolution} samples.")
 
                 if rollback_requested:
                     input(f"Press Enter to restart pass {pass_num + 1}/{num_passes}...")
@@ -672,15 +538,6 @@ def test_polar_pattern(
         if len(all_measurements) == 0:
             print("No data to save.")
             return None
-    finally:
-        # Always close the continuous audio stream
-        try:
-            if 'stream' in locals():
-                stream.stop()
-                stream.close()
-                print("Continuous audio stream closed.")
-        except Exception as e:
-            print(f"Warning: Error closing stream: {e}")
 
     if interrupted and not save_on_interrupt:
         print("Interrupted run detected. Partial data discarded (save_on_interrupt is OFF).")
