@@ -710,15 +710,16 @@ def test_polar_pattern(
     rel_angle = df_avg['relative_angle']
     bin_idx_unclipped = np.floor((rel_angle + (degrees_per_measurement * 0.5)) / degrees_per_measurement).astype(int)
     
-    # Remove outermost edge-padding measurements (first two bins before 0° and last two after total_degrees)
-    # Keep only the closest padding region to stabilize the boundaries without including initialization artifacts.
-    if edge_padding_points > 1:
-        valid_mask = (bin_idx_unclipped >= -(edge_padding_points - 1)) & (bin_idx_unclipped <= (resolution + edge_padding_points - 1))
-        df_avg = df_avg[valid_mask].copy()
-        bin_idx_unclipped = bin_idx_unclipped[valid_mask]
-        rel_angle = rel_angle[valid_mask]
+    # CRITICAL: Exclude edge-padding measurements from final output
+    # Edge padding (bins < 0 or >= resolution) should NOT appear in the final averaged results
+    # They were only used to stabilize the intermediate data collection, not for final display
+    valid_mask = (bin_idx_unclipped >= 0) & (bin_idx_unclipped < resolution)
+    df_avg = df_avg[valid_mask].copy()
+    bin_idx_unclipped = bin_idx_unclipped[valid_mask]
+    rel_angle = rel_angle[valid_mask]
     
-    bin_idx = np.clip(bin_idx_unclipped, 0, resolution)
+    # No clipping needed now - all bins are already in valid range
+    bin_idx = bin_idx_unclipped
     df_avg['angle_bin'] = bin_idx
     df_avg['expected_angle_binned'] = (reference_angle + df_avg['angle_bin'] * degrees_per_measurement) % 360.0
     df_avg['relative_angle_binned'] = df_avg['angle_bin'] * degrees_per_measurement
