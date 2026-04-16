@@ -349,40 +349,7 @@ def test_polar_pattern(
     # Get timestamp for this test run
     test_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
-    # Warm up filters/AGC before timed measurements to avoid low initial gain frames.
-    # This also gives a deterministic moment for the operator to start rotation.
-    warmup_seconds = 2.0
-    print(f"Warm-up: running {warmup_seconds:.1f}s pre-capture through processing chain...")
-    interrupted = False
-    try:
-        warmup_audio = sd.rec(
-            int(warmup_seconds * sample_rate),
-            samplerate=sample_rate,
-            channels=num_channels,
-            device=device_index,
-            blocking=True,
-        )
-        warmup_audio = np.asarray(warmup_audio).astype(np.float32)
-        warmup_peak = np.max(np.abs(warmup_audio)) if warmup_audio.size > 0 else 0.0
-        if warmup_peak > 1.0:
-            warmup_audio = warmup_audio / warmup_peak
-
-        if use_pipeline:
-            _ = apply_realtime_processing_chain(
-                block=warmup_audio,
-                beamformer=beamformer,
-                filters=filters,
-                agc=agc,
-                sample_rate=sample_rate,
-                monitor_gain=1.0,
-                theta_deg=0.0,
-                freeze_beamformer=bool(freeze_beamformer),
-                freeze_angle_deg=float(freeze_angle_deg) if freeze_angle_deg is not None else None,
-            )
-    except Exception as warmup_err:
-        print(f"Warm-up warning: {type(warmup_err).__name__}: {warmup_err}")
-
-    input("Warm-up complete. Press Enter to begin measurement and start rotation...")
+    input("Ready to begin. Press Enter to start measurement and rotate array at constant speed...")
     
     print(f"Starting {num_passes}-pass polar pattern measurements...")
     print("Press Ctrl+C to stop early")
@@ -440,14 +407,63 @@ def test_polar_pattern(
         )
         stream.start()
         print("Stream opened and running continuously.")
+        
         # Pre-fill the circular buffer before starting measurements
-        # This ensures we don't wait for each first measurement
-        prefill_duration = sample_duration + 0.5  # Ensure buffer has more than one measurement window ready
+        prefill_duration = sample_duration + 0.5
         print(f"Pre-filling buffer for {prefill_duration:.1f}s...")
         time.sleep(prefill_duration)
-        # CRITICAL: Record stream start time AFTER pre-fill, so all measurements reference a pre-filled buffer
+        
+        # CRITICAL: Record stream start time AFTER pre-fill but BEFORE settling phase
+        # All measurements (settling and actual) reference elapsed time from this point
         stream_start_time = time.time()
-        print()
+        
+        # CRITICAL SETTLING PHASE: Extract and process data through the pipeline to settle filters
+        # This lets the beamformer and filters equilibrate in the streaming context BEFORE measurements
+        settling_duration = 20.0  # Longer settling: 20 seconds to stabilize MVDR, spectral subtraction, AGC
+        print(f"Settling filters and beamformer for {settling_duration:.1f}s (processing data through pipeline)...")
+        settling_samples_needed = int(settling_duration * sample_rate)
+        settling_samples_processed = 0
+        
+        while settling_samples_processed < settling_samples_needed:
+            now = time.time()
+            # Use absolute elapsed time from stream_start_time (now properly defined)
+            absolute_elapsed = now - stream_start_time
+            abs_sample_idx = int(absolute_elapsed * sample_rate)
+            abs_end_idx = abs_sample_idx + int(sample_duration * sample_rate)
+            
+            # Extract audio from circular buffer
+            start_circ = abs_sample_idx % stream_buffer_size
+            end_circ = (abs_sample_idx + int(sample_duration * sample_rate)) % stream_buffer_size
+            
+            if start_circ < end_circ:
+                audio_data = stream_buffer[start_circ:end_circ].copy()
+            else:
+                # Wrap-around extraction
+                part1 = stream_buffer[start_circ:].copy()
+                part2 = stream_buffer[:end_circ].copy()
+                audio_data = np.vstack([part1, part2])
+            
+            # Process through pipeline WITHOUT saving
+            if use_pipeline and audio_data.size > 0:
+                try:
+                    _ = apply_realtime_processing_chain(
+                        block=audio_data,
+                        beamformer=beamformer,
+                        filters=filters,
+                        agc=agc,
+                        sample_rate=sample_rate,
+                        monitor_gain=1.0,
+                        theta_deg=0.0,
+                        freeze_beamformer=bool(freeze_beamformer),
+                        freeze_angle_deg=float(freeze_angle_deg) if freeze_angle_deg is not None else None,
+                    )
+                except Exception as e:
+                    print(f"  Settling phase warning: {e}")
+            
+            settling_samples_processed += int(sample_duration * sample_rate)
+            time.sleep(sample_duration * 0.5)  # Don't hammer the buffer
+        
+        print("Pipeline settled. Starting measurements now.\n")
     except Exception as e:
         print(f"ERROR: Failed to open continuous audio stream: {e}")
         return None
@@ -804,7 +820,7 @@ if __name__ == '__main__':
                         help='Steering angle used when beamformer freeze is enabled (default: 0.0)')
     parser.add_argument('--enable-agc', action=argparse.BooleanOptionalAction, default=False,
                         help='Enable both AGC stages (AdaptiveAmplifier + PedalboardAGC). DISABLED by default for directivity measurements to isolate beamformer performance. Enable only to test end-to-end system behavior.')
-    parser.add_argument('--enable-spectral-filter', action=argparse.BooleanOptionalAction, default=True,
+    parser.add_argument('--enable-spectral-filter', type=bool, default=True,
                         help='Enable spectral subtraction filter (default: enabled)')
     parser.add_argument('--save-on-interrupt', action=argparse.BooleanOptionalAction, default=False,
                         help='Save partial data when interrupted by Ctrl+C (default: disabled)')
