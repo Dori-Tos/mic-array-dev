@@ -390,42 +390,45 @@ def test_polar_pattern(
     print()
     
     # Continuous streaming setup: keep audio pipeline alive throughout all passes
-    # This prevents any state loss or transient settling between passes
-    total_test_duration = (num_passes * pass_duration_padded) + 1.0  # Buffer for safety
-    total_samples_needed = int(total_test_duration * sample_rate)
+    # Use a smaller circular buffer (~10 seconds) to avoid huge memory allocation
+    # The callback continuously fills this, and we extract windowed samples from it
+    stream_buffer_duration = 10.0  # Keep 10 seconds of audio in the circular buffer
+    stream_buffer_size = int(stream_buffer_duration * sample_rate)
+    stream_buffer = np.zeros((stream_buffer_size, num_channels), dtype=np.float32)
     
-    # Circular buffer to hold continuous audio stream (ring buffer with write pointer)
-    stream_buffer = np.zeros((total_samples_needed, num_channels), dtype=np.float32)
-    stream_write_pos = [0]  # Mutable container for callback to increment
-    stream_callback_count = [0]  # Track how many callbacks have been called
-    stream_error_flag = [False]  # Signal errors from callback
+    # Track total samples written (never wraps, only grows)
+    stream_total_samples_written = [0]  # Mutable container
+    stream_error_flag = [False]
     
     def stream_callback(indata, frames, time_obj, status):
-        """Callback that continuously fills the ring buffer with incoming audio."""
+        """Callback that continuously fills the circular buffer with incoming audio."""
         if status:
             print(f"Stream callback warning: {status}")
         
         try:
-            # Copy a chunk into the circular buffer
-            write_pos = stream_write_pos[0]
+            # Get current write position in circular buffer
+            total_written = stream_total_samples_written[0]
+            write_pos_circular = total_written % stream_buffer_size
             
-            # Handle wrap-around at the end of buffer
-            if write_pos + frames <= total_samples_needed:
-                stream_buffer[write_pos:write_pos + frames] = indata[:frames]
+            # Handle wrap-around when writing to circular buffer
+            if write_pos_circular + frames <= stream_buffer_size:
+                # No wrap - fits in one segment
+                stream_buffer[write_pos_circular:write_pos_circular + frames] = indata[:frames]
             else:
-                # Wrap around
-                remaining = total_samples_needed - write_pos
-                stream_buffer[write_pos:] = indata[:remaining]
-                stream_buffer[:frames - remaining] = indata[remaining:frames]
+                # Wrap-around - split into two segments
+                first_part = stream_buffer_size - write_pos_circular
+                stream_buffer[write_pos_circular:] = indata[:first_part]
+                stream_buffer[:frames - first_part] = indata[first_part:frames]
             
-            stream_write_pos[0] = (write_pos + frames) % total_samples_needed
-            stream_callback_count[0] += 1
+            # Update total samples written
+            stream_total_samples_written[0] += frames
+            
         except Exception as e:
             print(f"Stream callback error: {e}")
             stream_error_flag[0] = True
     
     # Start continuous input stream that will run throughout all passes
-    print(f"Opening continuous audio stream for {total_test_duration:.1f}s...")
+    print(f"Opening continuous audio stream...")
     try:
         stream = sd.InputStream(
             channels=num_channels,
@@ -437,6 +440,7 @@ def test_polar_pattern(
         )
         stream.start()
         print("Stream opened and running continuously.\n")
+        time.sleep(0.5)  # Brief pause to ensure stream is filling buffer
     except Exception as e:
         print(f"ERROR: Failed to open continuous audio stream: {e}")
         return None
@@ -502,38 +506,43 @@ def test_polar_pattern(
                             relative_angle_preview = total_degrees - logical_ccw_preview
                         expected_angle_preview = (reference_angle + relative_angle_preview) % 360
 
-                        # Extract audio sample from continuous stream buffer
-                        # Calculate expected write position in the buffer at this measurement time
+                        # Extract audio sample from continuous stream buffer using proper circular buffer math
                         now_for_extract = time.time()
                         elapsed_for_extract = np.clip(now_for_extract - pass_start_time, 0.0, pass_duration_padded)
                         
-                        # Sample index in the entire test duration (from start of warmup + begins of all passes)
-                        # Note: warmup_seconds were already consumed before stream started
-                        test_elapsed = warmup_seconds + elapsed_for_extract
-                        measurement_sample_idx = int(test_elapsed * sample_rate)
-                        measurement_end_idx = measurement_sample_idx + int(sample_duration * sample_rate)
+                        # Absolute sample index since stream started (after warmup)
+                        # test_elapsed = time since stream opened + time into current pass
+                        test_elapsed = elapsed_for_extract
+                        abs_sample_idx = int(test_elapsed * sample_rate)
+                        abs_end_idx = abs_sample_idx + int(sample_duration * sample_rate)
                         
-                        # Validate we have data at this position
-                        if measurement_end_idx > stream_callback_count[0] * int(sample_rate * 0.1):
-                            logger.warning(f"Stream buffer not yet filled at measurement index {measurement_sample_idx}. Waiting...")
-                            time.sleep(0.05)  # Brief wait for buffer to fill
+                        # Ensure we're not trying to read from the future
+                        total_written = stream_total_samples_written[0]
+                        if abs_end_idx > total_written:
+                            # Wait for buffer to fill (shouldn't happen often with 10s buffer)
+                            time_to_wait = (abs_end_idx - total_written) / sample_rate + 0.05
+                            logger.warning(f"Measurement window not yet available. Waiting {time_to_wait:.3f}s for buffer to fill...")
+                            time.sleep(time_to_wait)
                         
                         # Check for stream errors
                         if stream_error_flag[0]:
                             logger.error(f"Audio stream error detected. Aborting measurement.")
                             break
                         
-                        # Extract window from circular buffer
+                        # Extract from circular buffer, handling wrap-around
                         try:
-                            if measurement_end_idx <= total_samples_needed:
-                                # No wrap-around
-                                audio_data = stream_buffer[measurement_sample_idx:measurement_end_idx].copy()
+                            sample_range = int(sample_duration * sample_rate)
+                            start_circ = abs_sample_idx % stream_buffer_size
+                            end_circ = (abs_sample_idx + sample_range) % stream_buffer_size
+                            
+                            if start_circ < end_circ:
+                                # No wrap-around, simple extract
+                                audio_data = stream_buffer[start_circ:end_circ].copy()
                             else:
-                                # Wrap-around at buffer boundary (rare case)
-                                audio_data = np.vstack([
-                                    stream_buffer[measurement_sample_idx:],
-                                    stream_buffer[:measurement_end_idx - total_samples_needed]
-                                ])
+                                # Wrap-around case: combine two segments
+                                part1 = stream_buffer[start_circ:].copy()
+                                part2 = stream_buffer[:end_circ].copy()
+                                audio_data = np.vstack([part1, part2])
                         except Exception as e:
                             logger.error(f"Error extracting audio from stream buffer at angle {expected_angle_preview:.1f}°: {e}")
                             continue
