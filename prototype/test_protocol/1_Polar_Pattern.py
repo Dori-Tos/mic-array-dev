@@ -467,6 +467,9 @@ def test_polar_pattern(
     print("NOTE: Audio stream will remain CONTINUOUSLY OPEN between passes (no interruption)")
     print()
     
+    # Track whether measurements were interrupted
+    interrupted = False
+    
     try:
         for pass_num in range(num_passes):
             # Optional alternating direction across passes.
