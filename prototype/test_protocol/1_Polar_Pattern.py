@@ -348,13 +348,6 @@ def test_polar_pattern(
     
     # Get timestamp for this test run
     test_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-
-    input("Ready to begin. Press Enter to start measurement and rotate array at constant speed...")
-    
-    print(f"Starting {num_passes}-pass polar pattern measurements...")
-    print("Press Ctrl+C to stop early")
-    print("NOTE: Audio stream will remain CONTINUOUSLY OPEN between passes (no interruption)")
-    print()
     
     # Continuous streaming setup: keep audio pipeline alive throughout all passes
     # Use a smaller circular buffer (~10 seconds) to avoid huge memory allocation
@@ -408,25 +401,20 @@ def test_polar_pattern(
         stream.start()
         print("Stream opened and running continuously.")
         
-        # Pre-fill the circular buffer before starting measurements
-        prefill_duration = sample_duration + 0.5
-        print(f"Pre-filling buffer for {prefill_duration:.1f}s...")
-        time.sleep(prefill_duration)
-        
-        # CRITICAL: Record stream start time AFTER pre-fill but BEFORE settling phase
-        # All measurements (settling and actual) reference elapsed time from this point
+        # CRITICAL: Record stream start time IMMEDIATELY when stream opens
+        # All measurements reference elapsed time from this moment
         stream_start_time = time.time()
         
         # CRITICAL SETTLING PHASE: Extract and process data through the pipeline to settle filters
         # This lets the beamformer and filters equilibrate in the streaming context BEFORE measurements
-        settling_duration = 20.0  # Longer settling: 20 seconds to stabilize MVDR, spectral subtraction, AGC
+        settling_duration = 20.0  # Settling: 20 seconds to stabilize MVDR, spectral subtraction, AGC
         print(f"Settling filters and beamformer for {settling_duration:.1f}s (processing data through pipeline)...")
         settling_samples_needed = int(settling_duration * sample_rate)
         settling_samples_processed = 0
         
         while settling_samples_processed < settling_samples_needed:
             now = time.time()
-            # Use absolute elapsed time from stream_start_time (now properly defined)
+            # Use absolute elapsed time from stream_start_time
             absolute_elapsed = now - stream_start_time
             abs_sample_idx = int(absolute_elapsed * sample_rate)
             abs_end_idx = abs_sample_idx + int(sample_duration * sample_rate)
@@ -463,10 +451,17 @@ def test_polar_pattern(
             settling_samples_processed += int(sample_duration * sample_rate)
             time.sleep(sample_duration * 0.5)  # Don't hammer the buffer
         
-        print("Pipeline settled. Starting measurements now.\n")
+        print("Pipeline settled.")
+        input("Press Enter when turntable is at 0° and ready to start rotating...")
+        print()
     except Exception as e:
         print(f"ERROR: Failed to open continuous audio stream: {e}")
         return None
+    
+    print(f"Starting {num_passes}-pass polar pattern measurements...")
+    print("Press Ctrl+C to stop early")
+    print("NOTE: Audio stream will remain CONTINUOUSLY OPEN between passes (no interruption)")
+    print()
     
     try:
         for pass_num in range(num_passes):
