@@ -454,10 +454,15 @@ def test_polar_pattern(
         print("Pipeline settled.")
         input("Press Enter when turntable is at 0° and ready to start rotating...")
         
+        # CRITICAL: Clear the circular buffer to discard all settling data
+        # The old settling audio is useless for measurements - discard it entirely
+        stream_buffer.fill(0)
+        stream_total_samples_written[0] = 0
+        
         # CRITICAL: Reset stream_start_time NOW so measurements reference elapsed time from this point
-        # This ensures measurements extract from the current circular buffer window, not from the stream opening
+        # with a fresh circular buffer containing only measurement data
         stream_start_time = time.time()
-        print()
+        print("Circular buffer cleared. Starting with fresh audio data.\n")
     except Exception as e:
         print(f"ERROR: Failed to open continuous audio stream: {e}")
         return None
