@@ -453,6 +453,10 @@ def test_polar_pattern(
         
         print("Pipeline settled.")
         input("Press Enter when turntable is at 0° and ready to start rotating...")
+        
+        # CRITICAL: Reset stream_start_time NOW so measurements reference elapsed time from this point
+        # This ensures measurements extract from the current circular buffer window, not from the stream opening
+        stream_start_time = time.time()
         print()
     except Exception as e:
         print(f"ERROR: Failed to open continuous audio stream: {e}")
