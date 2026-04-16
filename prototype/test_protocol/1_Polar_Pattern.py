@@ -385,7 +385,61 @@ def test_polar_pattern(
     input("Warm-up complete. Press Enter to begin measurement and start rotation...")
     
     print(f"Starting {num_passes}-pass polar pattern measurements...")
-    print("Press Ctrl+C to stop early\n")
+    print("Press Ctrl+C to stop early")
+    print("NOTE: Audio stream will remain CONTINUOUSLY OPEN between passes (no interruption)")
+    print()
+    
+    # Continuous streaming setup: keep audio pipeline alive throughout all passes
+    # This prevents any state loss or transient settling between passes
+    total_test_duration = (num_passes * pass_duration_padded) + 1.0  # Buffer for safety
+    total_samples_needed = int(total_test_duration * sample_rate)
+    
+    # Circular buffer to hold continuous audio stream (ring buffer with write pointer)
+    stream_buffer = np.zeros((total_samples_needed, num_channels), dtype=np.float32)
+    stream_write_pos = [0]  # Mutable container for callback to increment
+    stream_callback_count = [0]  # Track how many callbacks have been called
+    stream_error_flag = [False]  # Signal errors from callback
+    
+    def stream_callback(indata, frames, time_obj, status):
+        """Callback that continuously fills the ring buffer with incoming audio."""
+        if status:
+            print(f"Stream callback warning: {status}")
+        
+        try:
+            # Copy a chunk into the circular buffer
+            write_pos = stream_write_pos[0]
+            
+            # Handle wrap-around at the end of buffer
+            if write_pos + frames <= total_samples_needed:
+                stream_buffer[write_pos:write_pos + frames] = indata[:frames]
+            else:
+                # Wrap around
+                remaining = total_samples_needed - write_pos
+                stream_buffer[write_pos:] = indata[:remaining]
+                stream_buffer[:frames - remaining] = indata[remaining:frames]
+            
+            stream_write_pos[0] = (write_pos + frames) % total_samples_needed
+            stream_callback_count[0] += 1
+        except Exception as e:
+            print(f"Stream callback error: {e}")
+            stream_error_flag[0] = True
+    
+    # Start continuous input stream that will run throughout all passes
+    print(f"Opening continuous audio stream for {total_test_duration:.1f}s...")
+    try:
+        stream = sd.InputStream(
+            channels=num_channels,
+            samplerate=sample_rate,
+            device=device_index,
+            blocksize=int(sample_rate * 0.1),  # 100ms blocks
+            callback=stream_callback,
+            latency='low'
+        )
+        stream.start()
+        print("Stream opened and running continuously.\n")
+    except Exception as e:
+        print(f"ERROR: Failed to open continuous audio stream: {e}")
+        return None
     
     try:
         for pass_num in range(num_passes):
@@ -448,17 +502,40 @@ def test_polar_pattern(
                             relative_angle_preview = total_degrees - logical_ccw_preview
                         expected_angle_preview = (reference_angle + relative_angle_preview) % 360
 
-                        # Record audio sample (4-channel for beamforming)
+                        # Extract audio sample from continuous stream buffer
+                        # Calculate expected write position in the buffer at this measurement time
+                        now_for_extract = time.time()
+                        elapsed_for_extract = np.clip(now_for_extract - pass_start_time, 0.0, pass_duration_padded)
+                        
+                        # Sample index in the entire test duration (from start of warmup + begins of all passes)
+                        # Note: warmup_seconds were already consumed before stream started
+                        test_elapsed = warmup_seconds + elapsed_for_extract
+                        measurement_sample_idx = int(test_elapsed * sample_rate)
+                        measurement_end_idx = measurement_sample_idx + int(sample_duration * sample_rate)
+                        
+                        # Validate we have data at this position
+                        if measurement_end_idx > stream_callback_count[0] * int(sample_rate * 0.1):
+                            logger.warning(f"Stream buffer not yet filled at measurement index {measurement_sample_idx}. Waiting...")
+                            time.sleep(0.05)  # Brief wait for buffer to fill
+                        
+                        # Check for stream errors
+                        if stream_error_flag[0]:
+                            logger.error(f"Audio stream error detected. Aborting measurement.")
+                            break
+                        
+                        # Extract window from circular buffer
                         try:
-                            audio_data = sd.rec(
-                                int(sample_duration * sample_rate),
-                                samplerate=sample_rate,
-                                channels=num_channels,
-                                device=device_index,
-                                blocking=True
-                            )
+                            if measurement_end_idx <= total_samples_needed:
+                                # No wrap-around
+                                audio_data = stream_buffer[measurement_sample_idx:measurement_end_idx].copy()
+                            else:
+                                # Wrap-around at buffer boundary (rare case)
+                                audio_data = np.vstack([
+                                    stream_buffer[measurement_sample_idx:],
+                                    stream_buffer[:measurement_end_idx - total_samples_needed]
+                                ])
                         except Exception as e:
-                            logger.error(f"Error recording audio at angle {expected_angle_preview:.1f}°: {e}")
+                            logger.error(f"Error extracting audio from stream buffer at angle {expected_angle_preview:.1f}°: {e}")
                             continue
 
                         if _consume_backspace_request():
@@ -553,6 +630,15 @@ def test_polar_pattern(
         if len(all_measurements) == 0:
             print("No data to save.")
             return None
+    finally:
+        # Always close the continuous audio stream
+        try:
+            if 'stream' in locals():
+                stream.stop()
+                stream.close()
+                print("Continuous audio stream closed.")
+        except Exception as e:
+            print(f"Warning: Error closing stream: {e}")
 
     if interrupted and not save_on_interrupt:
         print("Interrupted run detected. Partial data discarded (save_on_interrupt is OFF).")

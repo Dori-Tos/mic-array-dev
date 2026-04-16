@@ -39,17 +39,17 @@ import matplotlib.pyplot as plt
 BASE_DIR = "Python/Tests/mic-array-dev/"
 
 # Path to noise measurement CSV (averaged across all directions in the file)
-NOISE_CSV_FILE = BASE_DIR + "data/test_protocol/2_directivity_index/1_square/di_noise_averaged.csv"
+NOISE_CSV_FILE = BASE_DIR + "data/test_protocol/2_directivity_index/1_square/di_noise_averaged_2.csv"
 
 # Dictionary mapping frequency (Hz) to signal CSV file path
 # Example: {1000: "path/to/1khz.csv", 2000: "path/to/2khz.csv", ...}
 SIGNAL_CSV_FILES = {
-    500: BASE_DIR + "data/test_protocol/1_polar_pattern/1_square/polar_pattern_500_Hz.csv",
-    1000: BASE_DIR + "data/test_protocol/1_polar_pattern/1_square/polar_pattern_1000_Hz.csv",
-    1500: BASE_DIR + "data/test_protocol/1_polar_pattern/1_square/polar_pattern_1500_Hz.csv",
-    2000: BASE_DIR + "data/test_protocol/1_polar_pattern/1_square/polar_pattern_2000_Hz.csv",
-    3000: BASE_DIR + "data/test_protocol/1_polar_pattern/1_square/polar_pattern_3000_Hz.csv",
-    4000: BASE_DIR + "data/test_protocol/1_polar_pattern/1_square/polar_pattern_4000_Hz.csv",
+    500: BASE_DIR + "data/test_protocol/1_polar_pattern/1_square/polar_pattern_500_Hz_2.csv",
+    1000: BASE_DIR + "data/test_protocol/1_polar_pattern/1_square/polar_pattern_1000_Hz_2.csv",
+    1500: BASE_DIR + "data/test_protocol/1_polar_pattern/1_square/polar_pattern_1500_Hz_2.csv",
+    2000: BASE_DIR + "data/test_protocol/1_polar_pattern/1_square/polar_pattern_2000_Hz_2.csv",
+    3000: BASE_DIR + "data/test_protocol/1_polar_pattern/1_square/polar_pattern_3000_Hz_2.csv",
+    4000: BASE_DIR + "data/test_protocol/1_polar_pattern/1_square/polar_pattern_4000_Hz_2.csv",
 }
 
 # List of directions (degrees) to analyze
