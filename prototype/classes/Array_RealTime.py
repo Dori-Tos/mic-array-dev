@@ -25,17 +25,31 @@ def apply_realtime_processing_chain(
     theta_deg: float | None = None,
     freeze_beamformer: bool = False,
     freeze_angle_deg: float | None = None,
-) -> np.ndarray:
+    return_timing: bool = False,
+) -> np.ndarray | tuple:
     """
     Apply the same beamformer/filter/AGC chain used by Array_RealTime.
 
     This helper allows offline protocols to reuse the exact processing order
     without duplicating implementation details.
+    
+    :param return_timing: If True, returns (processed_audio, timing_dict) with per-component timing in ms
     """
+    import time
+    
+    timing = {
+        'beamformer_ms': 0.0,
+        'per_filter_ms': [],
+        'agc_ms': 0.0,
+        'total_ms': 0.0,
+    }
+    total_start = time.perf_counter()
+    
     processed = np.asarray(block, dtype=np.float32)
 
     if beamformer is not None:
         # Optional freeze mode: lock steering to a fixed angle for all processed blocks.
+        beam_start = time.perf_counter()
         if freeze_beamformer:
             if freeze_angle_deg is not None and hasattr(beamformer, "set_steering_angle"):
                 beamformer.set_steering_angle(float(freeze_angle_deg))
@@ -45,20 +59,40 @@ def apply_realtime_processing_chain(
                 processed = beamformer.apply(processed)
             else:
                 processed = beamformer.apply(processed, theta_deg=theta_deg)
+        timing['beamformer_ms'] = (time.perf_counter() - beam_start) * 1000.0
 
     if processed.ndim > 1:
         processed = np.squeeze(processed)
     processed = np.asarray(processed, dtype=np.float32).reshape(-1)
 
-    for filt in filters or []:
-        processed = np.asarray(filt.apply(processed), dtype=np.float32).reshape(-1)
+    # Filters - collect per-filter timing
+    if filters:
+        for i, filt in enumerate(filters or []):
+            processed = np.asarray(filt.apply(processed), dtype=np.float32).reshape(-1)
+            filter_name = filt.__class__.__name__
+            filter_time = filt.last_process_time_ms if hasattr(filt, 'last_process_time_ms') else 0.0
+            timing['per_filter_ms'].append({
+                'index': i,
+                'name': filter_name,
+                'time_ms': filter_time
+            })
 
+    # AGC - Collect overall timing and per-stage if available
     if agc is not None:
         processed = np.asarray(agc.process(processed, sample_rate=sample_rate), dtype=np.float32).reshape(-1)
+        agc_name = agc.__class__.__name__
+        if hasattr(agc, 'last_process_time_ms'):
+            timing['agc_ms'] = agc.last_process_time_ms
+        if hasattr(agc, 'stage_process_times_ms') and agc.stage_process_times_ms:
+            timing['agc_stages'] = agc.stage_process_times_ms
 
     if monitor_gain != 1.0:
         processed = processed * float(monitor_gain)
 
+    timing['total_ms'] = (time.perf_counter() - total_start) * 1000.0
+    
+    if return_timing:
+        return processed, timing
     return processed
 
 class Array_RealTime(Array):    
@@ -464,12 +498,19 @@ class Array_RealTime(Array):
                     if callable(getattr(filt, "apply", None)):
                         try:
                             mono_out = np.asarray(filt.apply(mono_out), dtype=np.float32).reshape(-1)
+                            if hasattr(filt, 'last_process_time_ms'):
+                                self.logger.debug(f"[Filter] {filt.__class__.__name__}: {filt.last_process_time_ms:.3f}ms")
                         except Exception as filter_err:
                             self.logger.warning(f"[Filter] {type(filter_err).__name__}: {filter_err}")
 
                 output_sample_rate = self.downsample_rate if self.downsample_rate is not None else self.sampling_rate
                 if self.agc is not None:
                     mono_out = np.asarray(self.agc.process(mono_out, sample_rate=output_sample_rate), dtype=np.float32).reshape(-1)
+                    if hasattr(self.agc, 'last_process_time_ms'):
+                        self.logger.debug(f"[AGC] Total: {self.agc.last_process_time_ms:.3f}ms")
+                    if hasattr(self.agc, 'stage_process_times_ms') and self.agc.stage_process_times_ms:
+                        stage_times = " | ".join([f"{name}: {t:.3f}ms" for name, t in self.agc.stage_process_times_ms.items()])
+                        self.logger.debug(f"[AGC Stages] {stage_times}")
 
                 post_agc_peak = float(np.max(np.abs(mono_out))) if mono_out.size > 0 else 0.0
                 if post_agc_peak >= self._post_agc_warn_threshold and (now_alert - self._alert_state["post_agc_peak_last"]) >= self._warn_interval_s:

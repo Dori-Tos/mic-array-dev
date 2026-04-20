@@ -18,6 +18,7 @@ class Filter:
         self.order = order
         self.sos = None
         self._zi = None
+        self.last_process_time_ms = 0.0  # Track processing time per block
 
     def _validate_cutoff(self, cutoff_freq: float):
         nyquist = self.sample_rate / 2
@@ -43,6 +44,9 @@ class Filter:
         self._zi = None
 
     def apply(self, data: np.ndarray) -> np.ndarray:
+        import time
+        start_time = time.perf_counter()
+        
         if self.sos is None:
             raise RuntimeError("Filter coefficients are not initialized")
 
@@ -52,6 +56,8 @@ class Filter:
 
         filtered, self._zi = signal.sosfilt(self.sos, arr, axis=0, zi=self._zi)
 
+        self.last_process_time_ms = (time.perf_counter() - start_time) * 1000.0
+        
         if np.asarray(data).ndim == 1:
             return filtered[:, 0]
         return filtered
@@ -322,11 +328,15 @@ class WienerFilter(Filter):
         return y.astype(np.float64, copy=False), noise_psd, smoothed_gain, power
 
     def apply(self, data: np.ndarray) -> np.ndarray:
+        import time
+        start_time = time.perf_counter()
+        
         arr = np.asarray(data, dtype=np.float64)
         if arr.ndim == 1:
             y, self._noise_psd_1d, self._prev_gain_1d, self._prev_power_1d = self._denoise_channel(
                 arr, self._noise_psd_1d, self._prev_gain_1d, self._prev_power_1d
             )
+            self.last_process_time_ms = (time.perf_counter() - start_time) * 1000.0
             return y
 
         if arr.ndim == 2:
@@ -342,8 +352,10 @@ class WienerFilter(Filter):
                     arr[:, ch], self._noise_psd_2d[ch], self._prev_gain_2d[ch], self._prev_power_2d[ch]
                 )
                 out[:, ch] = y
+            self.last_process_time_ms = (time.perf_counter() - start_time) * 1000.0
             return out
 
+        self.last_process_time_ms = (time.perf_counter() - start_time) * 1000.0
         raise ValueError("WienerFilter input must be 1D or 2D with shape (samples, channels)")
     
     
@@ -585,6 +597,9 @@ class SpectralSubtractionFilter(Filter):
         :param data: Audio array, shape (samples,) for mono or (samples, channels) for multi-channel.
         :return: Denoised audio array with same shape as input.
         """
+        import time
+        start_time = time.perf_counter()
+        
         arr = np.asarray(data, dtype=np.float64)
         
         if arr.ndim == 1:
@@ -594,6 +609,7 @@ class SpectralSubtractionFilter(Filter):
                     arr, self._input_buffer_1d, self._output_buffer_1d, self._noise_psd_1d, 
                     prev_gain=self._prev_gain_1d
                 )
+            self.last_process_time_ms = (time.perf_counter() - start_time) * 1000.0
             return y
         
         elif arr.ndim == 2:
@@ -615,6 +631,7 @@ class SpectralSubtractionFilter(Filter):
                     )
                 out[:, ch] = y
             
+            self.last_process_time_ms = (time.perf_counter() - start_time) * 1000.0
             return out
         
         else:

@@ -23,19 +23,25 @@ class Amplifier:
         self.gain = float(gain)
         self.max_output = float(max_output)
         self._last_log_time = time.time()
+        self.last_process_time_ms = 0.0  # Track processing time per block
     
     def reset(self):
         self._last_log_time = time.time()
     
     def process(self, samples: np.ndarray, sample_rate: float) -> np.ndarray:
         """Apply fixed gain amplification."""
+        start_time = time.perf_counter()
+        
         x = np.asarray(samples, dtype=np.float32).reshape(-1)
         if x.size == 0:
+            self.last_process_time_ms = 0.0
             return x
         
         y = x * self.gain
         peak_before = float(np.max(np.abs(x)))
         peak_after = float(np.max(np.abs(y)))
+        
+        self.last_process_time_ms = (time.perf_counter() - start_time) * 1000.0
         
         # Debug logging
         current_time = time.time()
@@ -139,6 +145,7 @@ class AdaptiveAmplifier:
         self._last_log_time = time.time()
         self._last_max_gain_warn_time = 0.0
         self._last_peak_warn_time = 0.0
+        self.last_process_time_ms = 0.0  # Track processing time per block
     
     def reset(self):
         self.current_gain = 1.0
@@ -152,8 +159,11 @@ class AdaptiveAmplifier:
         Apply adaptive amplification based on input RMS.
         Gain adapts slowly to reach target_rms without pumping artifacts.
         """
+        start_time = time.perf_counter()
+        
         x = np.asarray(samples, dtype=np.float32).reshape(-1)
         if x.size == 0:
+            self.last_process_time_ms = 0.0
             return x
         
         # Measure input RMS and peak
@@ -213,6 +223,8 @@ class AdaptiveAmplifier:
                 f"[AdaptiveAmplifier] Output peak {peak_after:.3f} exceeds 1.0 before downstream limiting/compression"
             )
             self._last_peak_warn_time = current_time
+        
+        self.last_process_time_ms = (time.perf_counter() - start_time) * 1000.0
         
         # Debug logging (every 1 second)
         if current_time - self._last_log_time >= 1.0:
@@ -294,6 +306,7 @@ class NoiseAwareAdaptiveAmplifier:
         self._last_active_time = time.time()
         self._last_log_time = time.time()
         self._eps = 1e-9
+        self.last_process_time_ms = 0.0  # Track processing time per block
     
     def reset(self):
         self.current_gain = 1.0
@@ -312,8 +325,11 @@ class NoiseAwareAdaptiveAmplifier:
                                  If provided, gates AGC boost when coherence is low (diffuse noise, back diffraction).
                                  Range: [0, 1] where 1=coherent point-source, 0=incoherent diffuse noise.
         """
+        start_time = time.perf_counter()
+        
         x = np.asarray(samples, dtype=np.float32).reshape(-1)
         if x.size == 0:
+            self.last_process_time_ms = 0.0
             return x
         
         rms = float(np.sqrt(np.mean(x * x) + self._eps))
@@ -394,6 +410,8 @@ class NoiseAwareAdaptiveAmplifier:
         y = x * self.current_gain
         peak_after = peak * self.current_gain
         
+        self.last_process_time_ms = (time.perf_counter() - start_time) * 1000.0
+        
         # Debug logging (every 1 second)
         if current_time - self._last_log_time >= 1.0:
             coherence_str = f"Coherence: {float(np.mean(coherence_signal if coherence_signal is not None else [0.0])):.3f}" if coherence_signal is not None else "NoCoherence"
@@ -419,6 +437,8 @@ class AGCChain:
         
         self.logger = logger
         self.stages = stages
+        self.last_process_time_ms = 0.0  # Total chain processing time
+        self.stage_process_times_ms = {}  # Per-stage timing breakdown
     
     def reset(self):
         for stage in self.stages:
@@ -433,8 +453,13 @@ class AGCChain:
         :param sample_rate: Sample rate in Hz
         :param coherence_signal: Optional inter-channel coherence signal. Passed to stages that support coherence gating.
         """
+        chain_start = time.perf_counter()
+        self.stage_process_times_ms = {}
+        
         y = samples
-        for stage in self.stages:
+        for i, stage in enumerate(self.stages):
+            stage_start = time.perf_counter()
+            
             # Pass coherence to stages that support it; ignore for stages that don't
             if hasattr(stage, 'process'):
                 import inspect
@@ -445,6 +470,13 @@ class AGCChain:
                     y = stage.process(y, sample_rate)
             else:
                 y = stage.process(y, sample_rate)
+            
+            # Record per-stage timing
+            stage_name = stage.__class__.__name__
+            stage_time_ms = (time.perf_counter() - stage_start) * 1000.0
+            self.stage_process_times_ms[f"{i}_{stage_name}"] = stage_time_ms
+        
+        self.last_process_time_ms = (time.perf_counter() - chain_start) * 1000.0
         return np.asarray(y, dtype=np.float32).reshape(-1)
 
 
