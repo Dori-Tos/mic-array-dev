@@ -80,9 +80,17 @@ def _wait_for_enter_or_backspace(prompt: str) -> str:
         return 'backspace' if response == '\b' else 'enter'
 
     fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
+    tcgetattr = getattr(termios, 'tcgetattr', None)
+    tcsetattr = getattr(termios, 'tcsetattr', None)
+    tcsadrain = getattr(termios, 'TCSADRAIN', None)
+    setraw = getattr(tty, 'setraw', None)
+    if not (callable(tcgetattr) and callable(tcsetattr) and tcsadrain is not None and callable(setraw)):
+        response = input()
+        return 'backspace' if response == '\b' else 'enter'
+
+    old_settings = tcgetattr(fd)
     try:
-        tty.setraw(fd)
+        setraw(fd)
         while True:
             ready, _, _ = select.select([sys.stdin], [], [], 0.01)
             if not ready:
@@ -95,7 +103,7 @@ def _wait_for_enter_or_backspace(prompt: str) -> str:
                 print()
                 return 'backspace'
     finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        tcsetattr(fd, tcsadrain, old_settings)
 
 
 DEFAULT_MEASUREMENT_ANGLES = [0, 15, 30, 45, 90, 180, 270, 315, 330, 345]
@@ -129,6 +137,8 @@ def test_di_signal(
     enable_spectral_filter=True,
     save_on_interrupt=False,
     process_block_ms=20.0,
+    doa_min_confidence_db: float | None = 1.0,
+    reset_doa_each_capture: bool = False,
 ):
     """
     Measure signal strength at a fixed set of angles using the processing pipeline.
@@ -335,14 +345,14 @@ def test_di_signal(
         filters = []
         agc = None
 
-    def _process_capture_block(audio_block: np.ndarray) -> tuple[np.ndarray, float | None]:
-        """Process captured audio in short chunks to mimic realtime; optionally returns last DOA."""
+    def _process_capture_block(audio_block: np.ndarray) -> tuple[np.ndarray, float | None, float | None]:
+        """Process captured audio in short chunks to mimic realtime; optionally returns last DOA/confidence."""
         audio_block = np.asarray(audio_block, dtype=np.float32)
 
         if not use_pipeline:
             if audio_block.ndim == 2 and audio_block.shape[1] > 0:
-                return np.asarray(audio_block[:, 0], dtype=np.float32).reshape(-1), None
-            return np.asarray(audio_block, dtype=np.float32).reshape(-1), None
+                return np.asarray(audio_block[:, 0], dtype=np.float32).reshape(-1), None, None
+            return np.asarray(audio_block, dtype=np.float32).reshape(-1), None, None
 
         if audio_block.ndim != 2:
             raise ValueError("Expected audio block with shape (samples, channels) when use_pipeline=True")
@@ -351,12 +361,19 @@ def test_di_signal(
             if not bool(freeze_beamformer) and doa_estimator is not None and beamformer is not None:
                 try:
                     doa_value = doa_estimator.estimate_doa(audio_block)
-                    if doa_value is not None and hasattr(beamformer, "set_steering_angle"):
+                    doa_conf = getattr(doa_estimator, 'latest_confidence_db', None)
+                    if (
+                        doa_value is not None
+                        and hasattr(beamformer, "set_steering_angle")
+                        and (doa_min_confidence_db is None or (doa_conf is not None and doa_conf >= float(doa_min_confidence_db)))
+                    ):
                         beamformer.set_steering_angle(float(doa_value))
                 except Exception:
                     doa_value = None
+                    doa_conf = None
             else:
                 doa_value = None
+                doa_conf = None
 
             out = apply_realtime_processing_chain(
                 block=audio_block,
@@ -369,10 +386,11 @@ def test_di_signal(
                 freeze_beamformer=bool(freeze_beamformer),
                 freeze_angle_deg=float(freeze_angle_deg) if freeze_angle_deg is not None else None,
             )
-            return np.asarray(out, dtype=np.float32).reshape(-1), doa_value
+            return np.asarray(out, dtype=np.float32).reshape(-1), doa_value, doa_conf
 
         out_chunks: list[np.ndarray] = []
         last_doa: float | None = None
+        last_conf: float | None = None
         n = audio_block.shape[0]
         for start in range(0, n, process_block_samples):
             chunk = audio_block[start:start + process_block_samples, :]
@@ -382,9 +400,15 @@ def test_di_signal(
             if not bool(freeze_beamformer) and doa_estimator is not None and beamformer is not None:
                 try:
                     doa_value = doa_estimator.estimate_doa(chunk)
-                    if doa_value is not None and hasattr(beamformer, "set_steering_angle"):
+                    doa_conf = getattr(doa_estimator, 'latest_confidence_db', None)
+                    if (
+                        doa_value is not None
+                        and hasattr(beamformer, "set_steering_angle")
+                        and (doa_min_confidence_db is None or (doa_conf is not None and doa_conf >= float(doa_min_confidence_db)))
+                    ):
                         beamformer.set_steering_angle(float(doa_value))
-                    last_doa = float(doa_value) if doa_value is not None else last_doa
+                        last_doa = float(doa_value)
+                        last_conf = float(doa_conf) if doa_conf is not None else last_conf
                 except Exception:
                     pass
 
@@ -402,9 +426,9 @@ def test_di_signal(
             out_chunks.append(np.asarray(out, dtype=np.float32).reshape(-1))
 
         if not out_chunks:
-            return np.zeros(0, dtype=np.float32), last_doa
+            return np.zeros(0, dtype=np.float32), last_doa, last_conf
 
-        return np.concatenate(out_chunks), last_doa
+        return np.concatenate(out_chunks), last_doa, last_conf
     
     # Storage for all measurements across all passes
     all_measurements = []
@@ -430,7 +454,7 @@ def test_di_signal(
             warmup_audio = warmup_audio / warmup_peak
 
         if use_pipeline:
-            _processed, _ = _process_capture_block(warmup_audio)
+            _processed, _, _ = _process_capture_block(warmup_audio)
     except Exception as warmup_err:
         print(f"Warm-up warning: {type(warmup_err).__name__}: {warmup_err}")
 
@@ -503,7 +527,7 @@ def test_di_signal(
                 if use_pipeline:
                     # Reset DOA state between captures so a large reposition does not require
                     # many small hill-climb updates to reacquire.
-                    if not bool(freeze_beamformer) and doa_estimator is not None:
+                    if reset_doa_each_capture and (not bool(freeze_beamformer)) and doa_estimator is not None:
                         doa_estimator.latest_doa = None
                         if hasattr(doa_estimator, "_last_update_time"):
                             try:
@@ -516,10 +540,11 @@ def test_di_signal(
                             except Exception:
                                 pass
 
-                    processed_audio, doa_deg = _process_capture_block(audio_data)
+                    processed_audio, doa_deg, doa_conf_db = _process_capture_block(audio_data)
                 else:
                     processed_audio = np.asarray(raw_mono, dtype=np.float32)
                     doa_deg = None
+                    doa_conf_db = None
 
                 processed_audio = np.asarray(processed_audio, dtype=np.float32)
                 rms_level = float(np.sqrt(np.mean(processed_audio ** 2)))
@@ -538,6 +563,7 @@ def test_di_signal(
                     'timestamp': datetime.now().isoformat(),
                     'reference_angle': reference_angle,
                     'doa_deg': float(doa_deg) if doa_deg is not None else np.nan,
+                    'doa_conf_db': float(doa_conf_db) if doa_conf_db is not None else np.nan,
                     'input_rms_level': input_rms_level,
                     'input_rms_dbfs': input_rms_dbfs,
                     'input_rms_level_avgch': input_rms_level_avgch,
@@ -595,6 +621,7 @@ def test_di_signal(
         'pass_number': 'count',
         'reference_angle': 'first',
         'doa_deg': 'mean',
+        'doa_conf_db': 'mean',
         'input_rms_level': 'mean',
         'input_rms_dbfs': 'mean',
         'input_rms_level_avgch': 'mean',
@@ -614,6 +641,7 @@ def test_di_signal(
         'num_passes',
         'reference_angle',
         'doa_deg',
+        'doa_conf_db',
         'input_rms_level',
         'input_rms_dbfs',
         'input_rms_level_avgch',
@@ -690,6 +718,12 @@ if __name__ == '__main__':
                         help='Steering angle used when beamformer freeze is enabled (default: 0.0)')
     parser.add_argument('--process-block-ms', type=float, default=20.0,
                         help='Processing chunk size in ms (default: 20.0). Important for overlap-add filters.')
+    parser.add_argument('--doa-min-confidence-db', type=float, default=1.0,
+                        help='Minimum DOA confidence in dB (best-vs-second-best beam power) required to update steering. '
+                             'Use 0 to disable gating; increase to reduce DOA jitter in diffuse/reverberant noise. (default: 1.0)')
+    parser.add_argument('--reset-doa-each-capture', action=argparse.BooleanOptionalAction, default=False,
+                        help='Reset DOA estimator state before each manual capture (default: disabled). '
+                             'Enable only if you frequently reposition far and want fast re-acquisition.')
     parser.add_argument('--enable-agc', action=argparse.BooleanOptionalAction, default=False,
                         help='Enable both AGC stages (AdaptiveAmplifier + PedalboardAGC) (default: disabled)')
     parser.add_argument('--enable-spectral-filter', action=argparse.BooleanOptionalAction, default=True,
@@ -717,6 +751,8 @@ if __name__ == '__main__':
         enable_spectral_filter=args.enable_spectral_filter,
         save_on_interrupt=args.save_on_interrupt,
         process_block_ms=args.process_block_ms,
+        doa_min_confidence_db=(None if float(args.doa_min_confidence_db) <= 0.0 else float(args.doa_min_confidence_db)),
+        reset_doa_each_capture=bool(args.reset_doa_each_capture),
     )
     
     # Usage examples:

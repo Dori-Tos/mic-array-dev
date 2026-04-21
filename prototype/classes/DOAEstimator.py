@@ -93,6 +93,7 @@ class IterativeDOAEstimator(DOAEstimator):
         self.bootstrap_full_scan = bool(bootstrap_full_scan)
         self._last_update_time = 0.0
         self._latest_gain = None
+        self.latest_confidence_db: float | None = None
 
     def _compute_gain(self, block: np.ndarray, angle_deg: float) -> float:
         beamformed = self.beamformer.apply(block, theta_deg=float(angle_deg))
@@ -112,19 +113,31 @@ class IterativeDOAEstimator(DOAEstimator):
 
         best_angle = float(angles[0])
         best_gain = -np.inf
+        second_best_gain = -np.inf
         for angle in angles:
             try:
                 gain = self._compute_gain(block, float(angle))
                 self.logger.debug(f"Angle {angle:6.1f}° -> gain {gain:.6e}")
                 if gain > best_gain:
+                    second_best_gain = best_gain
                     best_gain = gain
                     best_angle = float(angle)
+                elif gain > second_best_gain:
+                    second_best_gain = gain
             except Exception as e:
                 self.logger.error(f"Error computing beamform for angle {angle}: {e}", exc_info=True)
                 continue
 
         if not np.isfinite(best_gain):
             return None
+
+        # Confidence: peakiness of the best-vs-second-best beamformed power.
+        # For diffuse fields / omnipresent noise, this tends to be near 0 dB.
+        eps = 1e-20
+        if np.isfinite(second_best_gain) and second_best_gain > 0.0:
+            self.latest_confidence_db = float(10.0 * np.log10((best_gain + eps) / (second_best_gain + eps)))
+        else:
+            self.latest_confidence_db = None
         return best_angle, best_gain
 
     def _normalize_block_channels(self, block: np.ndarray) -> np.ndarray:
@@ -206,6 +219,14 @@ class IterativeDOAEstimator(DOAEstimator):
             current_gain = gain_by_angle.get(current_angle, -np.inf)
             best_angle = max(gain_by_angle, key=gain_by_angle.get)
             best_gain = gain_by_angle[best_angle]
+
+            # Confidence: best-vs-second-best power in the local neighborhood.
+            gains_sorted = sorted((g for g in gain_by_angle.values() if np.isfinite(g)), reverse=True)
+            eps = 1e-20
+            if len(gains_sorted) >= 2 and gains_sorted[1] > 0.0:
+                self.latest_confidence_db = float(10.0 * np.log10((gains_sorted[0] + eps) / (gains_sorted[1] + eps)))
+            else:
+                self.latest_confidence_db = None
 
             # Move only if improved; otherwise keep current angle.
             if best_gain > current_gain:
