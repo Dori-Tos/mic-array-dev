@@ -262,7 +262,7 @@ def test_di_signal(
         doa_estimator = IterativeDOAEstimator(
             logger=logger,
             update_rate=3.0,
-            angle_range=(-180.0, 180.0),
+            angle_range=(-25.0, 25.0),
             beamformer=DASBeamformer(
                 logger=logger,
                 mic_channel_numbers=mic_channel_numbers,
@@ -490,6 +490,16 @@ def test_di_signal(
                 input_rms_level = float(np.sqrt(np.mean(raw_mono ** 2)))
                 input_rms_dbfs = _safe_dbfs(input_rms_level)
 
+                # More angle-invariant input reference: average power across all mic channels.
+                # This avoids the "gain" peaking just because mic channel 0 happens to be
+                # in a null for a given rotation angle.
+                if audio_data.ndim == 2 and audio_data.shape[1] > 0:
+                    input_power_avgch = float(np.mean(audio_data ** 2))
+                    input_rms_level_avgch = float(np.sqrt(max(input_power_avgch, 0.0)))
+                else:
+                    input_rms_level_avgch = input_rms_level
+                input_rms_dbfs_avgch = _safe_dbfs(input_rms_level_avgch)
+
                 if use_pipeline:
                     # Reset DOA state between captures so a large reposition does not require
                     # many small hill-climb updates to reacquire.
@@ -516,7 +526,9 @@ def test_di_signal(
                 peak_level = float(np.max(np.abs(processed_audio))) if processed_audio.size > 0 else 0.0
                 rms_dbfs = _safe_dbfs(rms_level)
                 peak_dbfs = _safe_dbfs(peak_level)
-                gain_db = rms_dbfs - input_rms_dbfs
+                # Diagnostic: output/input ratio (depends on input channel level).
+                gain_inout_db = rms_dbfs - input_rms_dbfs
+                gain_inout_db_avgch = rms_dbfs - input_rms_dbfs_avgch
 
                 measurement = {
                     'measurement_index': len(all_measurements),
@@ -528,11 +540,14 @@ def test_di_signal(
                     'doa_deg': float(doa_deg) if doa_deg is not None else np.nan,
                     'input_rms_level': input_rms_level,
                     'input_rms_dbfs': input_rms_dbfs,
+                    'input_rms_level_avgch': input_rms_level_avgch,
+                    'input_rms_dbfs_avgch': input_rms_dbfs_avgch,
                     'rms_level': rms_level,
                     'rms_dbfs': rms_dbfs,
                     'peak_level': peak_level,
                     'peak_dbfs': peak_dbfs,
-                    'gain_db': gain_db,
+                    'gain_inout_db': gain_inout_db,
+                    'gain_inout_db_avgch': gain_inout_db_avgch,
                 }
 
                 all_measurements.append(measurement)
@@ -540,7 +555,7 @@ def test_di_signal(
                 print(
                     f"    ✓ Pass {pass_num + 1}/{num_passes} | "
                     f"Input: {input_rms_dbfs:7.2f} dBFS | Output: {rms_dbfs:7.2f} dBFS | "
-                    f"Gain: {gain_db:+7.2f} dB"
+                    f"Out/In: {gain_inout_db:+7.2f} dB"
                 )
         
     except KeyboardInterrupt:
@@ -556,6 +571,12 @@ def test_di_signal(
     
     # Convert all measurements to DataFrame
     df_all = pd.DataFrame(all_measurements)
+
+    # Match Protocol 1 plotting convention: express gain as output RMS relative to the run's peak.
+    # This guarantees the maximum response is 0 dB and other angles are negative.
+    if not df_all.empty and 'rms_dbfs' in df_all.columns:
+        ref_rms_dbfs = float(pd.to_numeric(df_all['rms_dbfs'], errors='coerce').max())
+        df_all['gain_db'] = pd.to_numeric(df_all['rms_dbfs'], errors='coerce') - ref_rms_dbfs
 
     # Save raw data with all passes
     raw_csv_file = output_path / f"angle_gain_{test_timestamp}.csv"
@@ -576,11 +597,14 @@ def test_di_signal(
         'doa_deg': 'mean',
         'input_rms_level': 'mean',
         'input_rms_dbfs': 'mean',
+        'input_rms_level_avgch': 'mean',
+        'input_rms_dbfs_avgch': 'mean',
         'rms_level': 'mean',
-        'rms_dbfs': 'mean',
+        'rms_dbfs': ['mean', 'std'],
         'peak_level': 'mean',
         'peak_dbfs': 'mean',
-        'gain_db': ['mean', 'std'],
+        'gain_inout_db': ['mean', 'std'],
+        'gain_inout_db_avgch': ['mean', 'std'],
     })
 
     grouped.columns = [
@@ -592,13 +616,24 @@ def test_di_signal(
         'doa_deg',
         'input_rms_level',
         'input_rms_dbfs',
+        'input_rms_level_avgch',
+        'input_rms_dbfs_avgch',
         'rms_level',
         'rms_dbfs',
+        'rms_dbfs_std',
         'peak_level',
         'peak_dbfs',
-        'gain_db',
-        'gain_db_std',
+        'gain_inout_db',
+        'gain_inout_db_std',
+        'gain_inout_db_avgch',
+        'gain_inout_db_avgch_std',
     ]
+
+    # Recompute gain_db on the averaged table as "relative RMS" (0 dB at the best angle).
+    if not grouped.empty:
+        ref_rms_dbfs_avg = float(pd.to_numeric(grouped['rms_dbfs'], errors='coerce').max())
+        grouped['gain_db'] = pd.to_numeric(grouped['rms_dbfs'], errors='coerce') - ref_rms_dbfs_avg
+        grouped['gain_db_std'] = pd.to_numeric(grouped.get('rms_dbfs_std', np.nan), errors='coerce')
 
     grouped.sort_values('angle_deg', inplace=True)
     grouped.reset_index(drop=True, inplace=True)
@@ -616,8 +651,8 @@ def test_di_signal(
     print(f"Fixed-angle measurement complete!")
     print(f"{'='*70}")
     print(f"  Total measurements: {len(df_all)} ({len(grouped)} angles × {num_passes} passes)")
-    print(f"\n  Gain:")
-    print(f"    Range: {gain_range:.2f} dB ({gain_min:.2f} to {gain_max:.2f} dB)")
+    print(f"\n  Gain (relative RMS, ref = peak angle):")
+    print(f"    Range: {gain_range:.2f} dB ({gain_min:.2f} to {gain_max:.2f} dB; max should be ~0 dB)")
     print(f"    Maximum at: {gain_max_angle:.1f}°")
     print(f"    Minimum at: {gain_min_angle:.1f}°")
     print(f"\n  Data saved to:")
@@ -687,7 +722,7 @@ if __name__ == '__main__':
     # Usage examples:
     #
     # Standard measurement with the fixed angle list:
-    # python prototype/test_protocol/2_DI_Signal.py --device 1 --passes 3 --duration 0.8
+    # python prototype/test_protocol/3_Free_Beam_Loss.py --device 1 --passes 3 --duration 0.8
     #
     # Override the angle list if needed:
-    # python prototype/test_protocol/2_DI_Signal.py --device 1 --angles 0,15,30,45,90,180,270,315,330,345
+    # python prototype/test_protocol/3_Free_Beam_Loss.py --device 1 --angles 0,15,30,45,90,180,270,315,330,345
