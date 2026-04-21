@@ -25,7 +25,7 @@ class DOAEstimator:
         
         self.logger: logging.Logger = logger
         self.frozen: bool = False
-        self.latest_doa = None
+        self.latest_doa: float | None = None
         self.update_rate = update_rate
         self.angle_range = angle_range
     

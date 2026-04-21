@@ -128,6 +128,7 @@ def test_di_signal(
     enable_agc=False,
     enable_spectral_filter=True,
     save_on_interrupt=False,
+    process_block_ms=20.0,
 ):
     """
     Measure signal strength at a fixed set of angles using the processing pipeline.
@@ -171,6 +172,12 @@ def test_di_signal(
     
     # Use 4 channels for array processing; keep single-channel raw mode.
     num_channels = 4 if use_pipeline else 1
+
+    # Process captured audio using short, fixed-size blocks so overlap-add filters behave like realtime.
+    process_block_ms = float(process_block_ms)
+    process_block_samples = int(max(32, round((process_block_ms / 1000.0) * sample_rate)))
+    capture_samples = int(max(1, round(sample_duration * sample_rate)))
+    process_block_samples = int(min(process_block_samples, capture_samples))
     
     print(f"\n{'='*70}")
     print(f"SNR Signal Test Protocol Configuration:")
@@ -181,6 +188,8 @@ def test_di_signal(
     print(f"  Number of passes: {num_passes}")
     print(f"  Fixed measurement angles: {measurement_angles}")
     print(f"  Sample duration: {sample_duration} seconds")
+    if use_pipeline:
+        print(f"  Processing chunk: {process_block_ms:.1f} ms ({process_block_samples} samples)")
     print(f"  Microphone reference angle: {reference_angle}°")
     print(f"  Total measurements: {num_passes * len(measurement_angles)}")
     print(f"  Output directory: {output_path}")
@@ -247,6 +256,23 @@ def test_di_signal(
             snr_threshold_for_sharpening=2.0,
             backward_null_strength=0.9,
         )
+
+        # DOA estimator (mirrors Array_RealTime behavior when beamformer is unfrozen)
+        # Use a DAS beamformer for fast scanning.
+        doa_estimator = IterativeDOAEstimator(
+            logger=logger,
+            update_rate=3.0,
+            angle_range=(-180.0, 180.0),
+            beamformer=DASBeamformer(
+                logger=logger,
+                mic_channel_numbers=mic_channel_numbers,
+                sample_rate=sample_rate,
+                mic_positions_m=mic_positions,
+            ),
+            scan_step_deg=5.0,
+            normalize_channels=True,
+            bootstrap_full_scan=True,
+        )
         
         # Filters (same config as test_pipeline.py)
         filters: list[object] = [
@@ -305,8 +331,80 @@ def test_di_signal(
         print("Pipeline initialized.\n")
     else:
         beamformer = None
+        doa_estimator = None
         filters = []
         agc = None
+
+    def _process_capture_block(audio_block: np.ndarray) -> tuple[np.ndarray, float | None]:
+        """Process captured audio in short chunks to mimic realtime; optionally returns last DOA."""
+        audio_block = np.asarray(audio_block, dtype=np.float32)
+
+        if not use_pipeline:
+            if audio_block.ndim == 2 and audio_block.shape[1] > 0:
+                return np.asarray(audio_block[:, 0], dtype=np.float32).reshape(-1), None
+            return np.asarray(audio_block, dtype=np.float32).reshape(-1), None
+
+        if audio_block.ndim != 2:
+            raise ValueError("Expected audio block with shape (samples, channels) when use_pipeline=True")
+
+        if process_block_samples <= 0 or audio_block.shape[0] <= process_block_samples:
+            if not bool(freeze_beamformer) and doa_estimator is not None and beamformer is not None:
+                try:
+                    doa_value = doa_estimator.estimate_doa(audio_block)
+                    if doa_value is not None and hasattr(beamformer, "set_steering_angle"):
+                        beamformer.set_steering_angle(float(doa_value))
+                except Exception:
+                    doa_value = None
+            else:
+                doa_value = None
+
+            out = apply_realtime_processing_chain(
+                block=audio_block,
+                beamformer=beamformer,
+                filters=filters,
+                agc=agc,
+                sample_rate=sample_rate,
+                monitor_gain=1.0,
+                theta_deg=None,
+                freeze_beamformer=bool(freeze_beamformer),
+                freeze_angle_deg=float(freeze_angle_deg) if freeze_angle_deg is not None else None,
+            )
+            return np.asarray(out, dtype=np.float32).reshape(-1), doa_value
+
+        out_chunks: list[np.ndarray] = []
+        last_doa: float | None = None
+        n = audio_block.shape[0]
+        for start in range(0, n, process_block_samples):
+            chunk = audio_block[start:start + process_block_samples, :]
+            if chunk.shape[0] == 0:
+                continue
+
+            if not bool(freeze_beamformer) and doa_estimator is not None and beamformer is not None:
+                try:
+                    doa_value = doa_estimator.estimate_doa(chunk)
+                    if doa_value is not None and hasattr(beamformer, "set_steering_angle"):
+                        beamformer.set_steering_angle(float(doa_value))
+                    last_doa = float(doa_value) if doa_value is not None else last_doa
+                except Exception:
+                    pass
+
+            out = apply_realtime_processing_chain(
+                block=chunk,
+                beamformer=beamformer,
+                filters=filters,
+                agc=agc,
+                sample_rate=sample_rate,
+                monitor_gain=1.0,
+                theta_deg=None,
+                freeze_beamformer=bool(freeze_beamformer),
+                freeze_angle_deg=float(freeze_angle_deg) if freeze_angle_deg is not None else None,
+            )
+            out_chunks.append(np.asarray(out, dtype=np.float32).reshape(-1))
+
+        if not out_chunks:
+            return np.zeros(0, dtype=np.float32), last_doa
+
+        return np.concatenate(out_chunks), last_doa
     
     # Storage for all measurements across all passes
     all_measurements = []
@@ -332,17 +430,7 @@ def test_di_signal(
             warmup_audio = warmup_audio / warmup_peak
 
         if use_pipeline:
-            _ = apply_realtime_processing_chain(
-                block=warmup_audio,
-                beamformer=beamformer,
-                filters=filters,
-                agc=agc,
-                sample_rate=sample_rate,
-                monitor_gain=1.0,
-                theta_deg=0.0,
-                freeze_beamformer=bool(freeze_beamformer),
-                freeze_angle_deg=float(freeze_angle_deg) if freeze_angle_deg is not None else None,
-            )
+            _processed, _ = _process_capture_block(warmup_audio)
     except Exception as warmup_err:
         print(f"Warm-up warning: {type(warmup_err).__name__}: {warmup_err}")
 
@@ -403,19 +491,25 @@ def test_di_signal(
                 input_rms_dbfs = _safe_dbfs(input_rms_level)
 
                 if use_pipeline:
-                    processed_audio = apply_realtime_processing_chain(
-                        block=audio_data,
-                        beamformer=beamformer,
-                        filters=filters,
-                        agc=agc,
-                        sample_rate=sample_rate,
-                        monitor_gain=1.0,
-                        theta_deg=0.0,
-                        freeze_beamformer=bool(freeze_beamformer),
-                        freeze_angle_deg=float(freeze_angle_deg) if freeze_angle_deg is not None else None,
-                    )
+                    # Reset DOA state between captures so a large reposition does not require
+                    # many small hill-climb updates to reacquire.
+                    if not bool(freeze_beamformer) and doa_estimator is not None:
+                        doa_estimator.latest_doa = None
+                        if hasattr(doa_estimator, "_last_update_time"):
+                            try:
+                                doa_estimator._last_update_time = 0.0
+                            except Exception:
+                                pass
+                        if hasattr(doa_estimator, "_latest_gain"):
+                            try:
+                                doa_estimator._latest_gain = None
+                            except Exception:
+                                pass
+
+                    processed_audio, doa_deg = _process_capture_block(audio_data)
                 else:
                     processed_audio = np.asarray(raw_mono, dtype=np.float32)
+                    doa_deg = None
 
                 processed_audio = np.asarray(processed_audio, dtype=np.float32)
                 rms_level = float(np.sqrt(np.mean(processed_audio ** 2)))
@@ -431,6 +525,7 @@ def test_di_signal(
                     'expected_angle': absolute_angle,
                     'timestamp': datetime.now().isoformat(),
                     'reference_angle': reference_angle,
+                    'doa_deg': float(doa_deg) if doa_deg is not None else np.nan,
                     'input_rms_level': input_rms_level,
                     'input_rms_dbfs': input_rms_dbfs,
                     'rms_level': rms_level,
@@ -478,6 +573,7 @@ def test_di_signal(
         'measurement_index': 'min',
         'pass_number': 'count',
         'reference_angle': 'first',
+        'doa_deg': 'mean',
         'input_rms_level': 'mean',
         'input_rms_dbfs': 'mean',
         'rms_level': 'mean',
@@ -493,6 +589,7 @@ def test_di_signal(
         'first_measurement_index',
         'num_passes',
         'reference_angle',
+        'doa_deg',
         'input_rms_level',
         'input_rms_dbfs',
         'rms_level',
@@ -550,12 +647,14 @@ if __name__ == '__main__':
                         help='Initial microphone pointing direction (default: 0°)')
     parser.add_argument('--no-pipeline', action='store_true',
                         help='Disable processing pipeline, record raw audio only')
-    parser.add_argument('--wait-between-passes', type=bool, default=True,
-                        help='Wait for Enter key before starting each new pass')
-    parser.add_argument('--freeze-beamformer', action=argparse.BooleanOptionalAction, default=True,
-                        help='Freeze beamformer steering during the full measurement run (default: enabled)')
+    parser.add_argument('--wait-between-passes', action=argparse.BooleanOptionalAction, default=True,
+                        help='Wait for Enter key before starting each new pass (default: enabled)')
+    parser.add_argument('--freeze-beamformer', action=argparse.BooleanOptionalAction, default=False,
+                        help='Freeze beamformer steering during the full measurement run (default: disabled)')
     parser.add_argument('--freeze-angle', type=float, default=0.0,
                         help='Steering angle used when beamformer freeze is enabled (default: 0.0)')
+    parser.add_argument('--process-block-ms', type=float, default=20.0,
+                        help='Processing chunk size in ms (default: 20.0). Important for overlap-add filters.')
     parser.add_argument('--enable-agc', action=argparse.BooleanOptionalAction, default=False,
                         help='Enable both AGC stages (AdaptiveAmplifier + PedalboardAGC) (default: disabled)')
     parser.add_argument('--enable-spectral-filter', action=argparse.BooleanOptionalAction, default=True,
@@ -582,6 +681,7 @@ if __name__ == '__main__':
         enable_agc=args.enable_agc,
         enable_spectral_filter=args.enable_spectral_filter,
         save_on_interrupt=args.save_on_interrupt,
+        process_block_ms=args.process_block_ms,
     )
     
     # Usage examples:

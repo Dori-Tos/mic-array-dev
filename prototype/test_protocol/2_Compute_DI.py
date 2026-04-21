@@ -2,18 +2,22 @@
 Directivity Index (DI) Frequency Analysis
 ==========================================
 
-Computes the directivity index of an array across multiple frequencies by:
-1. Reading a noise CSV file and averaging gain across all directions (omnidirectional reference)
-2. Reading signal CSV files for each frequency and extracting gains at specified directions
-3. Computing DI = 20 * log10(signal_gain / noise_average) for each direction
-4. Generating a frequency-dependent DI plot (DI vs frequency for each direction)
-5. Exporting results to CSV and PNG
+Computes the directivity index (DI) of an array across multiple frequencies.
+
+IMPORTANT:
+- DI is defined from the *same* frequency's directional pattern by comparing on-direction
+    power to the spatial average power over all angles.
+- This script assumes the gain-like column is expressed in dB (e.g., dBFS or gain_db).
+    DI is computed using POWER averaging: mean(10^(dB/10)), and DI = 10*log10(P_dir / P_avg).
+
+This avoids the common pitfall of using a separate "noise" measurement as an omnidirectional
+reference (which is generally not equivalent to a diffuse-field spatial average).
 
 Usage:
     python 2_Compute_DI.py
 
 Parameters (configured manually at the top of the script):
-    - NOISE_CSV_FILE: Path to the noise measurement CSV
+    - NOISE_CSV_FILE: (optional) Path to a noise measurement CSV (legacy; not used by default)
     - SIGNAL_CSV_FILES: Dict mapping frequency (Hz) to signal CSV file path
     - MEASUREMENT_DIRECTIONS: List of directions (degrees) to extract from CSV files
     - OUTPUT_DIR: Directory to save results
@@ -39,28 +43,32 @@ import matplotlib.pyplot as plt
 BASE_DIR = "Python/Tests/mic-array-dev/"
 
 # Path to noise measurement CSV (averaged across all directions in the file)
-NOISE_CSV_FILE = BASE_DIR + "data/test_protocol/2_directivity_index/1_square/di_noise_averaged_2.csv"
+NOISE_CSV_FILE = BASE_DIR + "data/test_protocol/1_polar_pattern/1_square_65dB/polar_pattern_pink_noise.csv"
 
 # Dictionary mapping frequency (Hz) to signal CSV file path
 # Example: {1000: "path/to/1khz.csv", 2000: "path/to/2khz.csv", ...}
 SIGNAL_CSV_FILES = {
-    500: BASE_DIR + "data/test_protocol/1_polar_pattern/1_square/polar_pattern_500_Hz_2.csv",
-    1000: BASE_DIR + "data/test_protocol/1_polar_pattern/1_square/polar_pattern_1000_Hz_2.csv",
-    1500: BASE_DIR + "data/test_protocol/1_polar_pattern/1_square/polar_pattern_1500_Hz_2.csv",
-    2000: BASE_DIR + "data/test_protocol/1_polar_pattern/1_square/polar_pattern_2000_Hz_2.csv",
-    3000: BASE_DIR + "data/test_protocol/1_polar_pattern/1_square/polar_pattern_3000_Hz_2.csv",
-    4000: BASE_DIR + "data/test_protocol/1_polar_pattern/1_square/polar_pattern_4000_Hz_2.csv",
+    500: BASE_DIR + "data/test_protocol/1_polar_pattern/1_square_65dB/polar_pattern_500_Hz.csv",
+    1000: BASE_DIR + "data/test_protocol/1_polar_pattern/1_square_65dB/polar_pattern_1000_Hz.csv",
+    1500: BASE_DIR + "data/test_protocol/1_polar_pattern/1_square_65dB/polar_pattern_1500_Hz.csv",
+    1750: BASE_DIR + "data/test_protocol/1_polar_pattern/1_square_65dB/polar_pattern_1750_Hz.csv",
+    2000: BASE_DIR + "data/test_protocol/1_polar_pattern/1_square_65dB/polar_pattern_2000_Hz.csv",
+    2500: BASE_DIR + "data/test_protocol/1_polar_pattern/1_square_65dB/polar_pattern_2500_Hz.csv",
+    3000: BASE_DIR + "data/test_protocol/1_polar_pattern/1_square_65dB/polar_pattern_3000_Hz.csv",
+    3500: BASE_DIR + "data/test_protocol/1_polar_pattern/1_square_65dB/polar_pattern_3500_Hz.csv",
+    4000: BASE_DIR + "data/test_protocol/1_polar_pattern/1_square_65dB/polar_pattern_4000_Hz.csv",
 }
 
 # List of directions (degrees) to analyze
-MEASUREMENT_DIRECTIONS = [0, 15, 30, 45, 315, 330, 345]
+MEASUREMENT_DIRECTIONS = [0, 15, 30, 45]
 
 # Output directory for results
 OUTPUT_DIR = BASE_DIR + "data/test_protocol/2_directivity_index/1_square"
 
 # Column names in CSV files (update if your CSVs use different column names)
-GAIN_COLUMN_NAME = "rms_dbfs"      # or "rms_dbfs" depending on your CSV
-ANGLE_COLUMN_NAME = "expected_angle"   # or "expected_angle"
+# Prefer gain_db if present (output/input), otherwise fall back to rms_dbfs.
+GAIN_COLUMN_NAME = "gain_db"
+ANGLE_COLUMN_NAME = "expected_angle"
 
 # If True, interpolate gain values at exact requested directions
 # If False, find the closest direction in the CSV
@@ -82,6 +90,19 @@ def _safe_dbfs(value: float, floor: float = 1e-10) -> float:
     return 20.0 * np.log10(max(float(value), floor))
 
 
+def _power_mean_from_db_series(db_values: pd.Series) -> float:
+    """Return mean power in linear domain from a series of dB values."""
+    if db_values.empty:
+        return float('nan')
+    db = pd.to_numeric(db_values, errors='coerce').dropna().astype(float)
+    if db.empty:
+        return float('nan')
+    # If values are in dB (amplitude dB or power dB), treating them as power-dB here is
+    # the correct approach for DI: P_linear = 10^(dB/10), then spatial average in linear.
+    p = 10.0 ** (db / 10.0)
+    return float(p.mean())
+
+
 def _find_csv_file(pattern: str) -> str | None:
     """Find the first file matching the glob pattern."""
     from glob import glob
@@ -99,8 +120,8 @@ def _interpolate_gain_at_angle(df: pd.DataFrame, target_angle: float,
     if df.empty or gain_col not in df.columns or angle_col not in df.columns:
         return None
     
-    angles = df[angle_col].values
-    gains = df[gain_col].values
+    angles = df[angle_col].to_numpy(dtype=float)
+    gains = df[gain_col].to_numpy(dtype=float)
     
     target_angle = float(target_angle) % 360.0
     
@@ -139,8 +160,8 @@ def _extract_gain_at_angle(df: pd.DataFrame, target_angle: float,
         # Find closest angle
         if df.empty or angle_col not in df.columns or gain_col not in df.columns:
             return None
-        angles = df[angle_col].values
-        gains = df[gain_col].values
+        angles = df[angle_col].to_numpy(dtype=float)
+        gains = df[gain_col].to_numpy(dtype=float)
         target_angle = float(target_angle) % 360.0
         
         distances = np.minimum(
@@ -157,8 +178,9 @@ def compute_di_analysis(
     measurement_directions: list | None = None,
     output_dir: str = "data/test_protocol/di_analysis",
     gain_column: str = "gain_db",
-    angle_column: str = "angle_deg",
+    angle_column: str = "expected_angle",
     interpolate_angles: bool = True,
+    use_noise_reference: bool = False,
 ):
     """
     Compute directivity index across frequencies.
@@ -197,34 +219,34 @@ def compute_di_analysis(
     print(f"Directivity Index Analysis")
     print(f"{'='*70}\n")
     
-    # Step 1: Read noise CSV and compute omnidirectional reference
-    print("Step 1: Reading noise measurement...")
-    
-    noise_file = _find_csv_file(noise_csv_file)
-    if not noise_file:
-        print(f"ERROR: Could not find noise CSV matching pattern: {noise_csv_file}")
-        return None
-    
-    try:
-        df_noise = pd.read_csv(noise_file)
-    except Exception as e:
-        logger.error(f"Failed to read noise CSV: {e}")
-        return None
-    
-    if gain_column not in df_noise.columns:
-        logger.error(f"Column '{gain_column}' not found in noise CSV. Available columns: {df_noise.columns.tolist()}")
-        return None
-    
-    # Average gain across all directions (omnidirectional reference)
-    noise_gain_avg_linear = 10.0 ** (df_noise[gain_column].mean() / 20.0)
-    noise_gain_avg_db = _safe_dbfs(noise_gain_avg_linear)
-    
-    print(f"  Noise file: {Path(noise_file).name}")
-    print(f"  Omnidirectional noise reference: {noise_gain_avg_db:.2f} dBFS (linear: {noise_gain_avg_linear:.4f})")
-    print(f"  Directions in noise CSV: {df_noise[angle_column].min():.1f}° to {df_noise[angle_column].max():.1f}°\n")
-    
-    # Step 2: Read signal CSV files and extract gains at requested directions
-    print("Step 2: Reading signal measurements at requested directions...\n")
+    noise_ref_power: float | None = None
+    if use_noise_reference:
+        print("Step 1: Reading noise measurement (legacy reference mode)...")
+        noise_file = _find_csv_file(noise_csv_file)
+        if not noise_file:
+            print(f"ERROR: Could not find noise CSV matching pattern: {noise_csv_file}")
+            return None
+        try:
+            df_noise = pd.read_csv(noise_file)
+        except Exception as e:
+            logger.error(f"Failed to read noise CSV: {e}")
+            return None
+
+        if gain_column not in df_noise.columns:
+            # Fallback for older CSVs
+            if 'rms_dbfs' in df_noise.columns:
+                logger.warning(f"Column '{gain_column}' not found in noise CSV; falling back to 'rms_dbfs'.")
+                gain_column = 'rms_dbfs'
+            else:
+                logger.error(f"Column '{gain_column}' not found in noise CSV. Available columns: {df_noise.columns.tolist()}")
+                return None
+
+        noise_ref_power = _power_mean_from_db_series(df_noise[gain_column])
+        print(f"  Noise file: {Path(noise_file).name}")
+        print(f"  Noise reference mean power (linear): {noise_ref_power:.6g}\n")
+
+    # Step 2: Read signal CSV files and extract DI at requested directions
+    print("Step 2: Reading signal measurements and computing DI...\n")
     
     di_results = {}  # frequency -> {direction -> DI_db}
     
@@ -238,11 +260,33 @@ def compute_di_analysis(
             logger.warning(f"Failed to read signal CSV for {freq} Hz: {e}")
             continue
         
-        if gain_column not in df_signal.columns:
-            logger.warning(f"Column '{gain_column}' not found in signal CSV for {freq} Hz")
+        effective_gain_col = gain_column
+        if effective_gain_col not in df_signal.columns:
+            if 'gain_db' in df_signal.columns:
+                effective_gain_col = 'gain_db'
+                logger.warning(f"Column '{gain_column}' not found for {freq} Hz; using 'gain_db'.")
+            elif 'rms_dbfs' in df_signal.columns:
+                effective_gain_col = 'rms_dbfs'
+                logger.warning(f"Column '{gain_column}' not found for {freq} Hz; using 'rms_dbfs'.")
+            else:
+                logger.warning(f"No usable gain column found for {freq} Hz. Available: {df_signal.columns.tolist()}")
+                continue
+
+        # Spatial-average reference power from this frequency's own pattern (preferred DI definition).
+        if use_noise_reference:
+            if noise_ref_power is None:
+                logger.warning(f"Noise reference mode enabled but no noise reference is available; skipping {freq} Hz.")
+                continue
+            ref_power = float(noise_ref_power)
+        else:
+            ref_power = float(_power_mean_from_db_series(df_signal[effective_gain_col]))
+
+        if not np.isfinite(ref_power) or ref_power <= 0.0:
+            logger.warning(f"Invalid reference power for {freq} Hz; skipping.")
             continue
         
-        print(f"  {freq} Hz: {Path(signal_file).name}")
+        ref_mode = "noise" if use_noise_reference else "spatial-mean"
+        print(f"  {freq} Hz: {Path(signal_file).name} (ref={ref_mode})")
         di_results[freq] = {}
         
         for direction in measurement_directions:
@@ -250,7 +294,7 @@ def compute_di_analysis(
                 df_signal,
                 target_angle=direction,
                 angle_col=angle_column,
-                gain_col=gain_column,
+                gain_col=effective_gain_col,
                 interpolate=interpolate_angles
             )
             
@@ -258,14 +302,12 @@ def compute_di_analysis(
                 logger.warning(f"    Could not extract gain at {direction}°")
                 continue
             
-            # Convert to linear domain for DI calculation
-            signal_gain_linear = 10.0 ** (signal_gain_db / 20.0)
-            
-            # DI = 20 * log10(signal_gain / noise_gain)
-            di_db = 20.0 * np.log10(max(signal_gain_linear / noise_gain_avg_linear, 1e-10))
+            # DI uses power ratio: P_dir / P_avg, where P_linear = 10^(dB/10)
+            p_dir = 10.0 ** (float(signal_gain_db) / 10.0)
+            di_db = 10.0 * np.log10(max(p_dir / ref_power, 1e-20))
             di_results[freq][direction] = di_db
-            
-            print(f"    {direction:6.1f}°: Signal {signal_gain_db:7.2f} dBFS → DI {di_db:+7.2f} dB")
+
+            print(f"    {direction:6.1f}°: {effective_gain_col} {signal_gain_db:7.2f} dB → DI {di_db:+7.2f} dB")
         
         print()
     
@@ -293,11 +335,12 @@ def compute_di_analysis(
     
     fig, ax = plt.subplots(figsize=PLOT_FIGSIZE, dpi=PLOT_DPI)
     
-    frequencies = df_di.index.values
-    colors = plt.cm.tab10(np.linspace(0, 1, len(df_di.columns)))
+    frequencies = df_di.index.to_numpy(dtype=float)
+    cmap = plt.get_cmap('tab10')
+    colors = [cmap(x) for x in np.linspace(0, 1, max(1, len(df_di.columns)))]
     
     for col_idx, direction in enumerate(df_di.columns):
-        di_values = df_di[direction].values
+        di_values = df_di[direction].to_numpy(dtype=float)
         
         # Skip if all NaN
         if np.all(np.isnan(di_values)):
@@ -317,6 +360,28 @@ def compute_di_analysis(
     ax.set_ylabel('Directivity Index (dB)', fontsize=12, fontweight='bold')
     ax.set_title('Directivity Index vs Frequency', fontsize=14, fontweight='bold')
     ax.grid(True, alpha=0.3, linestyle='--')
+
+    # Reference DI benchmarks
+    # Use y-axis transform so X is in axes fraction (stable even with log-x).
+    ref_lines = [
+        (0.0, 'Omnidirectionnal (0dB)'),
+        (6.0, 'Cardioid (6dB)'),
+        (8.0, 'Typical Array (8dB)'),
+    ]
+    for y, label in ref_lines:
+        ax.axhline(y=y, color='black', linestyle=':', linewidth=1.5, alpha=0.75, zorder=0)
+        ax.text(
+            0.15,
+            y,
+            label,
+            transform=ax.get_yaxis_transform(),
+            ha='right',
+            va='center',
+            fontsize=10,
+            fontweight='bold',
+            bbox=dict(boxstyle='round,pad=0.2', facecolor='white', edgecolor='none', alpha=0.7),
+        )
+
     ax.legend(title='Direction', loc='best', fontsize=10)
     
     # Set log scale for frequency if spanning multiple octaves
@@ -364,6 +429,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Disable angle interpolation (use nearest neighbor)"
     )
+    parser.add_argument(
+        "--use-noise-reference",
+        action="store_true",
+        help="LEGACY: compute DI relative to the provided noise CSV instead of each frequency's spatial mean."
+    )
     
     args = parser.parse_args()
     
@@ -384,4 +454,5 @@ if __name__ == "__main__":
         gain_column=GAIN_COLUMN_NAME,
         angle_column=ANGLE_COLUMN_NAME,
         interpolate_angles=not args.no_interpolate,
+        use_noise_reference=args.use_noise_reference,
     )
