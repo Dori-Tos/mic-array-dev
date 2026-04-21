@@ -641,8 +641,8 @@ if __name__ == '__main__':
     
     parser.add_argument('--duration', type=float, default=0.8,
                         help='Audio sample duration in seconds (default: 0.8)')
-    parser.add_argument('--output', type=str, default='data/test_protocol/snr_signal',
-                        help='Output directory (default: data/test_protocol/snr_signal)')
+    parser.add_argument('--output', type=str, default='data/test_protocol/3_free_beam_loss',
+                        help='Output directory (default: data/test_protocol/3_free_beam_loss)')
     parser.add_argument('--reference-angle', type=int, default=0,
                         help='Initial microphone pointing direction (default: 0°)')
     parser.add_argument('--no-pipeline', action='store_true',

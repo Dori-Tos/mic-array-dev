@@ -761,8 +761,8 @@ if __name__ == '__main__':
                         choices=['clockwise', 'counterclockwise'],
                         default='counterclockwise',
                         help='Direction of turntable rotation (default: counterclockwise)')
-    parser.add_argument('--output', type=str, default='data/test_protocol/polar_pattern',
-                        help='Output directory (default: data/test_protocol/polar_pattern)')
+    parser.add_argument('--output', type=str, default='data/test_protocol/1_polar_pattern',
+                        help='Output directory (default: data/test_protocol/1_polar_pattern)')
     parser.add_argument('--reference-angle', type=int, default=0,
                         help='Initial microphone pointing direction (default: 0°)')
     parser.add_argument('--no-pipeline', action='store_true',
