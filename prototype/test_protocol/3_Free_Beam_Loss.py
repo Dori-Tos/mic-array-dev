@@ -118,7 +118,7 @@ def test_di_signal(
     angles=None,
     device_index=None,
     sample_duration=0.8,
-    output_dir='data/test_protocol/di_signal',
+    output_dir='data/test_protocol/3_free_beam_loss',
     pattern=1,
     reference_angle=0,
     use_pipeline=True,
@@ -558,7 +558,7 @@ def test_di_signal(
     df_all = pd.DataFrame(all_measurements)
 
     # Save raw data with all passes
-    raw_csv_file = output_path / f"snr_signal_raw_{test_timestamp}.csv"
+    raw_csv_file = output_path / f"angle_gain_{test_timestamp}.csv"
     df_all.to_csv(raw_csv_file, index=False)
     print(f"\n{'='*70}")
     print(f"Raw data saved to: {raw_csv_file}")
@@ -603,7 +603,7 @@ def test_di_signal(
     grouped.sort_values('angle_deg', inplace=True)
     grouped.reset_index(drop=True, inplace=True)
 
-    averaged_csv_file = output_path / f"snr_signal_averaged_{test_timestamp}.csv"
+    averaged_csv_file = output_path / f"angle_gain_averaged_{test_timestamp}.csv"
     grouped.to_csv(averaged_csv_file, index=False)
 
     gain_min = grouped['gain_db'].min()

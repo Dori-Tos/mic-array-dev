@@ -99,7 +99,7 @@ def test_polar_pattern(
     device_index=None,
     sample_duration=0.8,
     rotation_direction='counterclockwise',
-    output_dir='data/polar_pattern',
+    output_dir='data/1_polar_pattern',
     reference_angle=0,
     use_pipeline=True,
     wait_between_passes=True,
@@ -414,7 +414,7 @@ def test_polar_pattern(
     # Settling phase: Let filters equilibrate with source audio
     print(f"Opening audio stream for filter settling...")
     try:
-        settling_duration = 20.0  # 20 seconds to stabilize MVDR, spectral subtraction, AGC
+        settling_duration = 5.0  # 5 seconds to stabilize MVDR, spectral subtraction, AGC
         settling_samples = int(settling_duration * sample_rate)
         print(f"Settling filters and beamformer for {settling_duration:.1f}s...")
         
@@ -785,8 +785,8 @@ if __name__ == '__main__':
                         help='Enable both AGC stages (AdaptiveAmplifier + PedalboardAGC). DISABLED by default for directivity measurements to isolate beamformer performance. Enable only to test end-to-end system behavior.')
     parser.add_argument('--enable-spectral-filter', action=argparse.BooleanOptionalAction, default=True,
                         help='Enable spectral subtraction filter (default: enabled)')
-    parser.add_argument('--process-block-ms', type=float, default=20.0,
-                        help='Processing chunk size in milliseconds used to apply the realtime processing chain (default: 20.0).')
+    parser.add_argument('--process-block-ms', type=float, default=5.0,
+                        help='Processing chunk size in milliseconds used to apply the realtime processing chain (default: 5.0).')
     parser.add_argument('--save-on-interrupt', action=argparse.BooleanOptionalAction, default=False,
                         help='Save partial data when interrupted by Ctrl+C (default: disabled)')
     
