@@ -102,7 +102,7 @@ def test_polar_pattern(
     output_dir='data/polar_pattern',
     reference_angle=0,
     use_pipeline=True,
-    wait_between_passes=False,
+    wait_between_passes=True,
     quarter_rotation=False,
     half_rotation=False,
     edge_padding_points=2,
@@ -472,8 +472,11 @@ def test_polar_pattern(
 
             while True:
                 with _pass_keyboard_mode():
-                    # Time-based synchronization: angle is derived from real elapsed time,
-                    # with edge-padding captures before/after the in-range window.
+                    # Synchronization model:
+                    # - Each measurement index corresponds to one *scheduled* angle bin.
+                    #   This prevents duplicate/missing bins in offline CSVs.
+                    # - We also compute a time-derived *measured* angle from the capture midpoint
+                    #   to quantify turntable speed drift / start offset.
                     pass_measurement_start_idx = len(all_measurements)
                     pass_start_time = time.perf_counter()
                     pass_end_time = pass_start_time + pass_duration_padded
@@ -522,22 +525,36 @@ def test_polar_pattern(
                             rollback_requested = True
                             break
 
+                        # Scheduled (grid) angle for this measurement index.
+                        scheduled_ccw = (-edge_padding_points + meas_idx) * degrees_per_measurement
+                        if pass_rotation_direction == 'counterclockwise':
+                            relative_angle_scheduled = scheduled_ccw
+                        else:
+                            relative_angle_scheduled = total_degrees - scheduled_ccw
+                        expected_angle_scheduled = (reference_angle + relative_angle_scheduled) % 360.0
+
+                        # Time-derived (measured) angle from capture midpoint.
                         capture_mid = 0.5 * (capture_start + capture_end)
                         elapsed_since_pass_start = max(0.0, min(capture_mid - pass_start_time, pass_duration_padded))
-
-                        # Calculate angle based on elapsed time from pass start (turntable rotation)
-                        logical_ccw = (-edge_padding_points * degrees_per_measurement) + (elapsed_since_pass_start * speed_deg_per_sec)
+                        measured_ccw = (-edge_padding_points * degrees_per_measurement) + (elapsed_since_pass_start * speed_deg_per_sec)
                         if pass_rotation_direction == 'counterclockwise':
-                            relative_angle = logical_ccw
+                            relative_angle_measured = measured_ccw
                         else:
-                            relative_angle = total_degrees - logical_ccw
-                        expected_angle = (reference_angle + relative_angle) % 360
+                            relative_angle_measured = total_degrees - measured_ccw
+                        expected_angle_measured = (reference_angle + relative_angle_measured) % 360.0
+
+                        angle_error_deg = relative_angle_measured - relative_angle_scheduled
 
                         # Ensure audio is float32 and normalized
                         audio_data = np.asarray(audio_data, dtype=np.float32)
                         max_val = float(np.max(np.abs(audio_data))) if audio_data.size else 0.0
                         if max_val > 1.0:
                             audio_data = audio_data / max_val
+
+                        # Input reference metrics (first mic channel) to compute gain drift.
+                        raw_mono = audio_data[:, 0] if audio_data.ndim == 2 and audio_data.shape[1] > 0 else audio_data.reshape(-1)
+                        input_rms_level = float(np.sqrt(np.mean(raw_mono ** 2))) if raw_mono.size else 0.0
+                        input_peak_level = float(np.max(np.abs(raw_mono))) if raw_mono.size else 0.0
 
                         # Apply processing pipeline (filters retain learned state from settling phase)
                         if use_pipeline:
@@ -554,10 +571,22 @@ def test_polar_pattern(
                         measurement = {
                             'measurement_index': len(all_measurements),
                             'pass_number': pass_num + 1,
-                            'expected_angle': expected_angle,
-                            'relative_angle': relative_angle,
+                            # Scheduled angle grid (used for binning/averaging)
+                            'expected_angle': expected_angle_scheduled,
+                            'relative_angle': relative_angle_scheduled,
+                            # Time-derived angle diagnostics
+                            'expected_angle_measured': expected_angle_measured,
+                            'relative_angle_measured': relative_angle_measured,
+                            'angle_error_deg': angle_error_deg,
+                            # Capture timing diagnostics
+                            'capture_start_s': float(capture_start - pass_start_time),
+                            'capture_end_s': float(capture_end - pass_start_time),
+                            'capture_mid_s': float(capture_mid - pass_start_time),
                             'timestamp': datetime.now().isoformat(),
                             'reference_angle': reference_angle,
+                            # Input levels
+                            'input_rms_level': input_rms_level,
+                            'input_peak_level': input_peak_level,
                             'rms_level': rms_level,
                             'peak_level': peak_level,
                         }
@@ -565,7 +594,9 @@ def test_polar_pattern(
 
                         # Progress output
                         print(f"  Pass {pass_num + 1}, Measurement {meas_idx + 1}/{padded_resolution}: "
-                            f"Angle: {expected_angle:6.1f}° (rel {relative_angle:6.1f}°) | RMS: {20*np.log10(max(rms_level, 1e-10)):7.2f} dB | "
+                            f"Angle: {expected_angle_scheduled:6.1f}° (rel {relative_angle_scheduled:6.1f}°) | "
+                            f"err {angle_error_deg:+6.2f}° | "
+                            f"RMS: {20*np.log10(max(rms_level, 1e-10)):7.2f} dB | "
                             f"Peak: {20*np.log10(max(peak_level, 1e-10)):7.2f} dB")
 
                         # Schedule next measurement
@@ -604,8 +635,11 @@ def test_polar_pattern(
     
     # Calculate dB values
     min_level = 1e-10
+    df_all['input_rms_dbfs'] = 20 * np.log10(np.maximum(df_all.get('input_rms_level', 0.0), min_level))
+    df_all['input_peak_dbfs'] = 20 * np.log10(np.maximum(df_all.get('input_peak_level', 0.0), min_level))
     df_all['rms_dbfs'] = 20 * np.log10(np.maximum(df_all['rms_level'], min_level))
     df_all['peak_dbfs'] = 20 * np.log10(np.maximum(df_all['peak_level'], min_level))
+    df_all['gain_db'] = df_all['rms_dbfs'] - df_all['input_rms_dbfs']
     
     # Save raw data with all passes
     raw_csv_file = output_path / f"polar_pattern_raw_{test_timestamp}.csv"
@@ -626,8 +660,8 @@ def test_polar_pattern(
         print("No in-range samples collected after filtering edge-padding points.")
         return None
 
-    # relative_angle is time-derived float, so values differ slightly across passes.
-    # Bin to intended grid before averaging to avoid sawtooth high/low alternation.
+    # relative_angle is the scheduled grid; it is stable and should produce exactly one bin per capture.
+    # We still bin to the intended grid for safety.
     # Use an extra endpoint bin so the upper-limit angle (e.g., 90°) is explicitly represented.
     rel_angle = df_avg['relative_angle']
     bin_idx_unclipped = np.floor((rel_angle + (degrees_per_measurement * 0.5)) / degrees_per_measurement).astype(int)
@@ -648,6 +682,10 @@ def test_polar_pattern(
     
     # Group by binned angles and calculate mean for numeric columns
     grouped = df_avg.groupby(['angle_bin', 'expected_angle_binned', 'relative_angle_binned'], as_index=False).agg({
+        'input_rms_level': 'mean',
+        'input_rms_dbfs': 'mean',
+        'gain_db': 'mean',
+        'angle_error_deg': 'mean',
         'rms_level': 'mean',
         'rms_dbfs': 'mean',
         'peak_level': 'mean',
@@ -729,8 +767,8 @@ if __name__ == '__main__':
                         help='Initial microphone pointing direction (default: 0°)')
     parser.add_argument('--no-pipeline', action='store_true',
                         help='Disable processing pipeline, record raw audio only')
-    parser.add_argument('--wait-between-passes', action=argparse.BooleanOptionalAction, default=False,
-                        help='Wait for Enter key before starting each new pass (default: disabled)')
+    parser.add_argument('--wait-between-passes', action=argparse.BooleanOptionalAction, default=True,
+                        help='Wait for Enter key before starting each new pass (default: enabled)')
     parser.add_argument('--quarter-rotation', action='store_true',
                         help='Measure only front 90° instead of full 360° (useful for measuring front directivity and mirroring afterwards)')
     parser.add_argument('--half-rotation', action='store_true',
