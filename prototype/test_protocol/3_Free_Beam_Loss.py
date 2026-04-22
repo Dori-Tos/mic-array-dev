@@ -285,8 +285,8 @@ def test_di_signal(
                 mic_positions_m=mic_positions,
             ),
             scan_step_deg=5.0,
-            normalize_channels=True,
-            bootstrap_full_scan=True,
+            local_search_radius_deg=10.0,
+            periodic_full_scan_blocks=20,
         )
         
         # Filters (same config as test_pipeline.py)
