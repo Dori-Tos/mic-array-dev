@@ -81,6 +81,12 @@ def _build_mode_components(
     *,
     mode: int,
     logger: logging.Logger,
+    doa_logger: logging.Logger,
+    beamformer_logger: logging.Logger,
+    echo_canceller_logger: logging.Logger,
+    filter_logger: logging.Logger,
+    agc_logger: logging.Logger,
+    codec_logger: logging.Logger,
     sample_rate: int,
     mic_positions,
     agc,
@@ -105,14 +111,14 @@ def _build_mode_components(
         }
 
     das_beamformer = DASBeamformer(
-        logger=logger,
+        logger=beamformer_logger,
         mic_channel_numbers=mic_channel_numbers,
         sample_rate=sample_rate,
         mic_positions_m=mic_positions,
     )
 
     mvdr_beamformer = MVDRBeamformer(
-        logger=logger,
+        logger=beamformer_logger,
         mic_channel_numbers=mic_channel_numbers,
         sample_rate=sample_rate,
         mic_positions_m=mic_positions,
@@ -129,7 +135,7 @@ def _build_mode_components(
     )
 
     doa_estimator = IterativeDOAEstimator(
-        logger=logger,
+        logger=doa_logger,
         update_rate=3.0,
         angle_range=(-25, 25),
         beamformer=das_beamformer,
@@ -141,7 +147,7 @@ def _build_mode_components(
         "mic_list": mic_list,
         "doa_estimator": doa_estimator,
         "beamformer": mvdr_beamformer,
-        "echo_canceller": EchoCanceller(logger=logger, sample_rate=sample_rate, channels=4),
+        "echo_canceller": EchoCanceller(logger=echo_canceller_logger, sample_rate=sample_rate, channels=4),
         "filters": filters,
         "agc": agc,
         "codec": codec,
@@ -170,8 +176,21 @@ if __name__ == "__main__":
     logger = logging.getLogger("MicArrayTest")
     logger.setLevel(logging.INFO) 
     
+    doa_logger = logging.getLogger("DOAEstimator")
+    doa_logger.setLevel(logging.DEBUG)
+    beamformer_logger = logging.getLogger("Beamformer")
+    beamformer_logger.setLevel(logging.INFO)
+    echo_canceller_logger = logging.getLogger("EchoCanceller")
+    echo_canceller_logger.setLevel(logging.INFO)
+    filter_logger = logging.getLogger("Filters")
+    filter_logger.setLevel(logging.INFO)
+    agc_logger = logging.getLogger("AGC")
+    agc_logger.setLevel(logging.INFO)
+    codec_logger = logging.getLogger("Codec")
+    codec_logger.setLevel(logging.INFO)
+    
     console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO) 
+    console_handler.setLevel(logging.DEBUG) 
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
@@ -185,14 +204,14 @@ if __name__ == "__main__":
     filter_rate = sample_rate 
     filters = [
         BandPassFilter(
-            logger=logger, 
+            logger=filter_logger, 
             sample_rate=sample_rate, 
             low_cutoff=300.0, 
             high_cutoff=4000.0, 
             order=4),
         
         SpectralSubtractionFilter(
-            logger=logger,
+            logger=filter_logger,
             sample_rate=sample_rate,
             noise_factor=0.65,              # Moderate noise suppression 
             gain_floor=0.55,                # Higher floor prevents over-suppression of low freqs (was 0.35)
@@ -204,7 +223,7 @@ if __name__ == "__main__":
     
     agc = AGCChain(logger=logger, stages=[
         NoiseAwareAdaptiveAmplifier(
-            logger=logger,
+            logger=agc_logger,
             target_rms=0.08,          # Target 0.08 (-21.9 dB) for normal speech baseline
             min_gain=0.7,             # Allow attenuation to 0.7x to suppress noise/silence
             max_gain_baseline=6.0,    # Baseline max (actual will be capped by noise floor)
@@ -218,7 +237,7 @@ if __name__ == "__main__":
         ),
         
         PedalboardAGC(
-            logger=logger,
+            logger=agc_logger,
             sample_rate=sample_rate,
             threshold_db=-20.0,       # Compress only above normal speech operating zone
             ratio=2.0,                # Gentler compression (was 3.5) to prevent hunting
@@ -233,7 +252,7 @@ if __name__ == "__main__":
     output_mode = "local"  # "local" or "codec"
     if output_mode == "codec":
         codec = OpusCodec(
-            logger=logger,
+            logger=codec_logger,
             bitrate=24000,
             frame_duration_ms=10,
             application="voip",
@@ -242,12 +261,18 @@ if __name__ == "__main__":
         )
     else:
         # In local mode, use a lightweight codec object; codec transport is not used.
-        codec = G711Codec(logger=logger)
+        codec = G711Codec(logger=codec_logger)
 
     mode = MODE_FULL
     mode_cfg = _build_mode_components(
         mode=mode,
         logger=logger,
+        doa_logger=doa_logger,
+        beamformer_logger=beamformer_logger,
+        echo_canceller_logger=echo_canceller_logger,
+        filter_logger=filter_logger,
+        agc_logger=agc_logger,
+        codec_logger=codec_logger,
         sample_rate=sample_rate,
         mic_positions=mic_positions,
         agc=agc,
@@ -332,6 +357,12 @@ if __name__ == "__main__":
                     agc=agc,
                     filters=filters,
                     codec=codec,
+                    doa_logger=doa_logger,
+                    beamformer_logger=beamformer_logger,
+                    echo_canceller_logger=echo_canceller_logger,
+                    filter_logger=filter_logger,
+                    agc_logger=agc_logger,
+                    codec_logger=codec_logger,
                 )
 
                 print(f"Switching mode: {mode_cfg['mode_label']}")

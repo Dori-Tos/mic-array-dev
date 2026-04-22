@@ -10,7 +10,7 @@ from typing import Sequence
 import numpy as np
 import threading
 import time
-import logging
+from logging import Logger
 
 import sounddevice as sd
 
@@ -34,17 +34,19 @@ class Array:
     """
     
     
-    def __init__(self, logger: logging.Logger,
+    def __init__(self, logger: Logger,
                  id_vendor, id_product, mic_list: list[Microphone], sampling_rate: int,
                  doa_estimator: DOAEstimator, beamformer: Beamformer, 
                  echo_canceller: EchoCanceller, filters: Sequence[Filter], agc: AGC, codec: Codec,
                  device_index: int | None = None):
         
-        self.logger: logging.Logger = logger
+        self.logger: Logger = logger
+    
         self.id_vendor: int = id_vendor
         self.id_product: int = id_product
         self.mic_list: list[Microphone] = mic_list
         self.sampling_rate: int = sampling_rate
+        
         self.doa_estimator: DOAEstimator = doa_estimator
         self.beamformer: Beamformer = beamformer
         self.echo_canceller: EchoCanceller = echo_canceller
