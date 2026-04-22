@@ -400,13 +400,21 @@ class Array_RealTime(Array):
         self.logger.info(f"Processing thread started (downsample_rate: {self.downsample_rate})")
         block_count = 0
         start_time = time.monotonic()
+        
+        # Timing accumulators for performance statistics
+        timing_accumulators = {
+            'doa_ms': [],
+            'beamforming_ms': [],
+            'filters_ms': [],
+            'agc_ms': [],
+            'resampling_ms': [],
+        }
 
         while not self._processing_stop_event.is_set():
             try:
                 block = self._audio_queue.get(timeout=0.1)
                 block_count += 1
                 queue_size = self._audio_queue.qsize()
-                self.logger.debug(f"[Processing] Received block #{block_count}, shape: {block.shape}, queue_size: {queue_size}")
             except queue.Empty:
                 self.logger.debug("[Processing] Queue timeout, no block received")
                 continue
@@ -451,12 +459,16 @@ class Array_RealTime(Array):
                 self.logger.debug(f"[Processing] Skipping DOA update due to backlog (queue_size={queue_size}), reusing {doa_value:.1f}°")
             elif callable(doa_fn):
                 try:
-                    self.logger.debug("[Processing] Starting DOA estimation")
                     doa_value = doa_fn(block)
-                    elapsed_doa = time.monotonic() - start_doa
-                    self.logger.debug(f"[DOA] Estimated: {doa_value:.1f}° (took {elapsed_doa*1000:.2f}ms)")
+                    # Use DOAEstimator's own computation time measurement (excludes early returns)
+                    if hasattr(self.doa_estimator, 'last_process_time_ms'):
+                        timing_accumulators['doa_ms'].append(self.doa_estimator.last_process_time_ms)
+                    else:
+                        elapsed_doa = time.monotonic() - start_doa
+                        timing_accumulators['doa_ms'].append(elapsed_doa * 1000.0)
                 except Exception as e:
                     elapsed_doa = time.monotonic() - start_doa
+                    timing_accumulators['doa_ms'].append(elapsed_doa * 1000.0)
                     self.logger.error(f"[DOA Estimation Error] {type(e).__name__}: {e} (after {elapsed_doa*1000:.2f}ms)")
                     doa_value = None
 
@@ -476,12 +488,18 @@ class Array_RealTime(Array):
                         if beamformed_arr.size > 0:
                             beamformed_value = beamformed_arr.copy()
                             mono_out = beamformed_arr
-                            elapsed_bf = time.monotonic() - start_bf
-                            self.logger.debug(f"[Beamforming] Output shape: {beamformed_arr.shape} (took {elapsed_bf*1000:.2f}ms)")
+                            # Use beamformer's own timing measurement
+                            if hasattr(self.beamformer, 'last_process_time_ms'):
+                                timing_accumulators['beamforming_ms'].append(self.beamformer.last_process_time_ms)
+                            else:
+                                elapsed_bf = time.monotonic() - start_bf
+                                timing_accumulators['beamforming_ms'].append(elapsed_bf * 1000.0)
                 else:
+                    elapsed_bf = time.monotonic() - start_bf
                     mono_out = self._extract_processing_mono(block)
             except Exception as e:
                 elapsed_bf = time.monotonic() - start_bf
+                timing_accumulators['beamforming_ms'].append(elapsed_bf * 1000.0)
                 self.logger.error(f"[Beamforming Error] {type(e).__name__}: {e} (after {elapsed_bf*1000:.2f}ms)")
                 beamformed_value = None
 
@@ -498,19 +516,21 @@ class Array_RealTime(Array):
                     if callable(getattr(filt, "apply", None)):
                         try:
                             mono_out = np.asarray(filt.apply(mono_out), dtype=np.float32).reshape(-1)
+                            # Use filter's own timing measurement
                             if hasattr(filt, 'last_process_time_ms'):
-                                self.logger.debug(f"[Filter] {filt.__class__.__name__}: {filt.last_process_time_ms:.3f}ms")
+                                timing_accumulators['filters_ms'].append(filt.last_process_time_ms)
                         except Exception as filter_err:
                             self.logger.warning(f"[Filter] {type(filter_err).__name__}: {filter_err}")
 
                 output_sample_rate = self.downsample_rate if self.downsample_rate is not None else self.sampling_rate
                 if self.agc is not None:
+                    agc_start = time.monotonic()
                     mono_out = np.asarray(self.agc.process(mono_out, sample_rate=output_sample_rate), dtype=np.float32).reshape(-1)
+                    agc_elapsed = time.monotonic() - agc_start
                     if hasattr(self.agc, 'last_process_time_ms'):
-                        self.logger.debug(f"[AGC] Total: {self.agc.last_process_time_ms:.3f}ms")
-                    if hasattr(self.agc, 'stage_process_times_ms') and self.agc.stage_process_times_ms:
-                        stage_times = " | ".join([f"{name}: {t:.3f}ms" for name, t in self.agc.stage_process_times_ms.items()])
-                        self.logger.debug(f"[AGC Stages] {stage_times}")
+                        timing_accumulators['agc_ms'].append(self.agc.last_process_time_ms)
+                    else:
+                        timing_accumulators['agc_ms'].append(agc_elapsed * 1000.0)
 
                 post_agc_peak = float(np.max(np.abs(mono_out))) if mono_out.size > 0 else 0.0
                 if post_agc_peak >= self._post_agc_warn_threshold and (now_alert - self._alert_state["post_agc_peak_last"]) >= self._warn_interval_s:
@@ -530,7 +550,11 @@ class Array_RealTime(Array):
                     self._alert_state["final_peak_last"] = now_alert
 
                 processing_rate = self.downsample_rate if self.downsample_rate is not None else self.sampling_rate
+                resample_start = time.monotonic()
                 mono_out = self._resample_to_playback_rate(mono_out, int(processing_rate))
+                resample_elapsed = time.monotonic() - resample_start
+                if resample_elapsed > 0.0001:  # Only accumulate if actually resampled
+                    timing_accumulators['resampling_ms'].append(resample_elapsed * 1000.0)
 
                 if self.output_mode == "codec":
                     self._send_codec_chunk(mono_out, int(processing_rate))
@@ -557,10 +581,43 @@ class Array_RealTime(Array):
                 self._latest_doa = doa_value
                 self._latest_beamformed = beamformed_value
 
-            if block_count % 5 == 0:
+            if block_count % 10 == 0:
+                # Calculate average delays from accumulated timings
+                avg_delays = {
+                    'doa_ms': np.mean(timing_accumulators['doa_ms']) if timing_accumulators['doa_ms'] else 0.0,
+                    'beamforming_ms': np.mean(timing_accumulators['beamforming_ms']) if timing_accumulators['beamforming_ms'] else 0.0,
+                    'filters_ms': np.mean(timing_accumulators['filters_ms']) if timing_accumulators['filters_ms'] else 0.0,
+                    'agc_ms': np.mean(timing_accumulators['agc_ms']) if timing_accumulators['agc_ms'] else 0.0,
+                    'resampling_ms': np.mean(timing_accumulators['resampling_ms']) if timing_accumulators['resampling_ms'] else 0.0,
+                }
+                
+                total_processing_delay = sum(avg_delays.values())
+                
+                delay_breakdown = " | ".join(filter(None, [
+                    f"DOA: {avg_delays['doa_ms']:.2f}ms" if avg_delays['doa_ms'] > 0 else None,
+                    f"Beamforming: {avg_delays['beamforming_ms']:.2f}ms" if avg_delays['beamforming_ms'] > 0 else None,
+                    f"Filters: {avg_delays['filters_ms']:.2f}ms" if avg_delays['filters_ms'] > 0 else None,
+                    f"AGC: {avg_delays['agc_ms']:.2f}ms" if avg_delays['agc_ms'] > 0 else None,
+                    f"Resampling: {avg_delays['resampling_ms']:.2f}ms" if avg_delays['resampling_ms'] > 0 else None,
+                ]))
+                
                 elapsed_total = time.monotonic() - start_time
-                blocks_per_sec = block_count / elapsed_total
-                self.logger.debug(f"[Performance] Processed {block_count} blocks in {elapsed_total:.1f}s ({blocks_per_sec:.1f} blocks/sec), avg {total_time*1000:.0f}ms/block")
+                blocks_per_sec = block_count / elapsed_total if elapsed_total > 0 else 0
+                
+                self.logger.debug(
+                    f"[Timing Summary] Total processing delay: {total_processing_delay:.2f}ms | "
+                    f"{delay_breakdown} | "
+                    f"Overall: {block_count} blocks in {elapsed_total:.1f}s ({blocks_per_sec:.1f} blocks/sec)"
+                )
+                
+                # Clear accumulators for next window
+                timing_accumulators = {
+                    'doa_ms': [],
+                    'beamforming_ms': [],
+                    'filters_ms': [],
+                    'agc_ms': [],
+                    'resampling_ms': [],
+                }
 
         total_time = time.monotonic() - start_time
         self.logger.info(f"Processing thread stopped after {block_count} blocks in {total_time:.1f}s")

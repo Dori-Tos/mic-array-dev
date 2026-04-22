@@ -94,7 +94,7 @@ def _build_mode_components(
     codec,
 ):
     use_single_mic = mode == MODE_SINGLE
-    mic_channel_numbers = [0] if use_single_mic else [0, 1, 2, 3, 4, 5, 6, 7]
+    mic_channel_numbers = [0] if use_single_mic else [0, 1, 2, 3]
     mic_list = [Microphone(logger=logger, channel_number=i, sampling_rate=sample_rate) for i in mic_channel_numbers]
 
     if use_single_mic:
@@ -140,8 +140,10 @@ def _build_mode_components(
         angle_range=(-25, 25),
         beamformer=das_beamformer,
         scan_step_deg=5.0,
+        local_search_radius_deg=10.0,
+        periodic_full_scan_blocks=20,
     )
-    doa_estimator.freeze(0.0)
+    # doa_estimator.freeze(0.0)
 
     return {
         "mic_list": mic_list,
@@ -162,7 +164,7 @@ if __name__ == "__main__":
     downsample_rate = None  # Process at native 48kHz, no resampling artifacts
     monitor_gain = 0.22
     
-    mic_channel_numbers = [0, 1, 2, 3, 4, 5, 6, 7]
+    mic_channel_numbers = [0, 1, 2, 3]
     
     """
     With 4 mics => Beamforming = 4-5ms
@@ -174,10 +176,10 @@ if __name__ == "__main__":
     # => 20ms blocks for the buffer (960/48kHz = 0.02s)
     
     logger = logging.getLogger("MicArrayTest")
-    logger.setLevel(logging.INFO) 
+    logger.setLevel(logging.INFO)
     
     doa_logger = logging.getLogger("DOAEstimator")
-    doa_logger.setLevel(logging.DEBUG)
+    doa_logger.setLevel(logging.INFO)
     
     beamformer_logger = logging.getLogger("Beamformer")
     beamformer_logger.setLevel(logging.INFO)
@@ -210,7 +212,7 @@ if __name__ == "__main__":
     codec_logger.addHandler(console_handler)
 
     
-    geometry_path = script_dir / "array_geometries" / "2_Corners.xml"
+    geometry_path = script_dir / "array_geometries" / "1_square.xml"
     mic_positions = MVDRBeamformer.load_positions_from_xml(str(geometry_path))
     
     # Passband to eliminate low-frequency rumble and high-frequency hiss
@@ -326,27 +328,7 @@ if __name__ == "__main__":
         with _key_capture_mode():
             while True:
                 action = _poll_mode_control_key()
-                if action is None:
-                    # Log timing information periodically
-                    current_time = time.time()
-                    if current_time - last_timing_log >= timing_log_interval:
-                        # Collect timing info from filters and AGC
-                        filter_times = []
-                        for i, filt in enumerate(filters):
-                            if hasattr(filt, 'last_process_time_ms'):
-                                filter_times.append(f"{filt.__class__.__name__}: {filt.last_process_time_ms:.3f}ms")
-                        
-                        if hasattr(agc, 'last_process_time_ms'):
-                            agc_total = agc.last_process_time_ms
-                            logger.debug(f"[Timing] Filters: {' | '.join(filter_times) if filter_times else 'N/A'} | AGC Total: {agc_total:.3f}ms")
-                            
-                            # Log per-stage AGC timing if available
-                            if hasattr(agc, 'stage_process_times_ms') and agc.stage_process_times_ms:
-                                stage_info = " | ".join([f"{name}: {t:.3f}ms" for name, t in agc.stage_process_times_ms.items()])
-                                logger.debug(f"[Timing] AGC Stages: {stage_info}")
-                        
-                        last_timing_log = current_time
-                    
+                if action is None:                    
                     time.sleep(0.05)
                     continue
 

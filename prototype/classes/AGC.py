@@ -667,7 +667,7 @@ class Limiter:
         # Convert soft knee to linear: threshold ± (soft_knee_db/2)
         self.soft_knee_factor = 10.0 ** (soft_knee_db / 20.0) if soft_knee_db > 0 else 1.0
         self.soft_knee_start = threshold / self.soft_knee_factor
-        
+        self.last_process_time_ms = 0.0  # Track processing time per block
         self._last_log_time = time.time()
     
     def reset(self):
@@ -675,8 +675,10 @@ class Limiter:
     
     def process(self, samples: np.ndarray, sample_rate: float) -> np.ndarray:
         """Apply hard limiting to prevent clipping. No gain control."""
+        start_time = time.perf_counter()
         x = np.asarray(samples, dtype=np.float32).reshape(-1)
         if x.size == 0:
+            self.last_process_time_ms = 0.0
             return x
         
         peak = float(np.max(np.abs(x)))
@@ -695,6 +697,8 @@ class Limiter:
         else:
             # Hard knee: clip anything above threshold
             y = np.clip(x, -self.threshold, self.threshold)
+        
+        self.last_process_time_ms = (time.perf_counter() - start_time) * 1000.0
         
         # Debug logging
         current_time = time.time()
@@ -894,6 +898,7 @@ class PedalboardAGC:
             f"attack={attack_ms}ms, release={release_ms}ms. "
             f"Limiter: threshold={limiter_threshold_db}dB, release={limiter_release_ms}ms"
         )
+        self.last_process_time_ms = 0.0  # Track processing time per block
     
     def reset(self):
         """Reset Pedalboard state (typically not needed, but provided for API compatibility)."""
@@ -910,12 +915,15 @@ class PedalboardAGC:
         :param sample_rate: Sampling rate (used for compatibility, actual rate is from __init__).
         :return: Processed audio array with same shape as input.
         """
+        start_time = time.perf_counter()
         x = np.asarray(samples, dtype=np.float32).reshape(-1)
         if x.size == 0:
+            self.last_process_time_ms = 0.0
             return x
         
         try:
             processed = self.board(x, self.sample_rate)
+            self.last_process_time_ms = (time.perf_counter() - start_time) * 1000.0
             return np.asarray(processed, dtype=np.float32)
         except Exception as e:
             self.logger.error(f"PedalboardAGC.process() failed: {e}")

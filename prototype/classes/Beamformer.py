@@ -49,6 +49,7 @@ class Beamformer:
                 )
         self.mic_positions_m = positions
         self._steering_angle_deg = 0.0
+        self.last_process_time_ms = 0.0  # Track processing time per apply() call
 
     @staticmethod
     def load_positions_from_xml(xml_path: str) -> np.ndarray:
@@ -184,8 +185,8 @@ class DASBeamformer(Beamformer):
         angle = self.get_steering_angle() if theta_deg is None else float(theta_deg)
         result = self.process(block, angle)
         beam_time_ms = (time.perf_counter() - beam_start) * 1000.0
+        self.last_process_time_ms = beam_time_ms
         result_arr = np.asarray(result)
-        self.logger.debug(f"[Beamforming] Output shape: {result_arr.shape} (took {beam_time_ms:.2f}ms)")
         return result
 
 
@@ -597,5 +598,5 @@ class MVDRBeamformer(Beamformer):
         result = self.process(block, angle)
         beam_time_ms = (time.perf_counter() - beam_start) * 1000.0
         result_arr = np.asarray(result)
-        self.logger.debug(f"[Beamforming] Output shape: {result_arr.shape} (took {beam_time_ms:.2f}ms)")
+        self.last_process_time_ms = beam_time_ms
         return result
