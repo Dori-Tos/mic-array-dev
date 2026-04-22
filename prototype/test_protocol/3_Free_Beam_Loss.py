@@ -125,7 +125,7 @@ def test_di_signal(
     num_passes=1,
     angles=None,
     device_index=None,
-    sample_duration=0.8,
+    sample_duration=2.0,
     output_dir='data/test_protocol/3_free_beam_loss',
     pattern=1,
     reference_angle=0,
@@ -148,6 +148,8 @@ def test_di_signal(
         angles: List of angles to measure. Defaults to the fixed base list requested.
         device_index: Audio device index for 4-channel array (None = use default input)
         sample_duration: Duration to record audio at each point in seconds.
+                Default 2.0s to allow DOA estimator time to converge to accurate steering
+                (at update_rate=3.0 Hz, this gives ~6 updates for convergence).
         output_dir: Directory to save measurement data
         reference_angle: Reference offset applied to the fixed angle list.
         use_pipeline: Whether to apply full processing pipeline with beamformer (default: True)
@@ -198,6 +200,9 @@ def test_di_signal(
     print(f"  Number of passes: {num_passes}")
     print(f"  Fixed measurement angles: {measurement_angles}")
     print(f"  Sample duration: {sample_duration} seconds")
+    if use_pipeline and not bool(freeze_beamformer):
+        doa_updates_est = int(sample_duration * 3.0)  # 3.0 Hz update rate
+        print(f"    → Estimated DOA updates per capture: ~{doa_updates_est} (sufficient for convergence)")
     if use_pipeline:
         print(f"  Processing chunk: {process_block_ms:.1f} ms ({process_block_samples} samples)")
     print(f"  Microphone reference angle: {reference_angle}°")
@@ -441,13 +446,25 @@ def test_di_signal(
     print(f"Warm-up: running {warmup_seconds:.1f}s pre-capture through processing chain...")
     interrupted = False
     try:
-        warmup_audio = sd.rec(
-            int(warmup_seconds * sample_rate),
+        # Record warmup audio in non-blocking mode for Ctrl+C responsiveness
+        total_warmup_samples = int(warmup_seconds * sample_rate)
+        chunk_size = int(sample_rate * 0.1)  # 100ms per chunk
+        warmup_chunks = []
+        
+        stream = sd.InputStream(
             samplerate=sample_rate,
             channels=num_channels,
             device=device_index,
-            blocking=True,
+            blocksize=chunk_size,
         )
+        with stream:
+            samples_recorded = 0
+            while samples_recorded < total_warmup_samples:
+                chunk, _ = stream.read(chunk_size)
+                warmup_chunks.append(chunk)
+                samples_recorded += len(chunk)
+        
+        warmup_audio = np.vstack(warmup_chunks) if warmup_chunks else np.zeros((total_warmup_samples, num_channels), dtype=np.float32)
         warmup_audio = np.asarray(warmup_audio).astype(np.float32)
         warmup_peak = np.max(np.abs(warmup_audio)) if warmup_audio.size > 0 else 0.0
         if warmup_peak > 1.0:
@@ -455,6 +472,9 @@ def test_di_signal(
 
         if use_pipeline:
             _processed, _, _ = _process_capture_block(warmup_audio)
+    except KeyboardInterrupt:
+        print("Warm-up interrupted by user. Exiting.")
+        return None
     except Exception as warmup_err:
         print(f"Warm-up warning: {type(warmup_err).__name__}: {warmup_err}")
 
@@ -494,13 +514,39 @@ def test_di_signal(
                         continue
 
                 try:
-                    audio_data = sd.rec(
-                        int(sample_duration * sample_rate),
+                    # Record in non-blocking mode with interrupt checks for better Ctrl+C responsiveness
+                    total_samples = int(sample_duration * sample_rate)
+                    chunk_size = int(sample_rate * 0.1)  # 100ms per chunk for interrupt checks
+                    audio_chunks = []
+                    
+                    print(f"    Recording (press Ctrl+C to stop)...", end="", flush=True)
+                    stream = sd.InputStream(
                         samplerate=sample_rate,
                         channels=num_channels,
                         device=device_index,
-                        blocking=True,
+                        blocksize=chunk_size,
                     )
+                    with stream:
+                        samples_recorded = 0
+                        while samples_recorded < total_samples:
+                            try:
+                                chunk, _ = stream.read(chunk_size)
+                                audio_chunks.append(chunk)
+                                samples_recorded += len(chunk)
+                                elapsed = samples_recorded / sample_rate
+                                print(f"\r    Recording: {elapsed:.2f}s / {sample_duration:.2f}s", end="", flush=True)
+                            except KeyboardInterrupt:
+                                print("\n    Recording interrupted by user")
+                                interrupted = True
+                                raise
+                    
+                    audio_data = np.vstack(audio_chunks) if audio_chunks else np.zeros((total_samples, num_channels), dtype=np.float32)
+                    print()  # newline
+                    
+                except KeyboardInterrupt:
+                    print("\nMeasurement interrupted at recording stage")
+                    interrupted = True
+                    raise
                 except Exception as e:
                     logger.error(f"Error recording audio at angle {absolute_angle:.1f}°, pass {pass_num + 1}: {e}")
                     continue
@@ -702,8 +748,10 @@ if __name__ == '__main__':
     parser.add_argument('--device', type=int, default=None,
                         help='Audio device index (default: system default input device)')
     
-    parser.add_argument('--duration', type=float, default=0.8,
-                        help='Audio sample duration in seconds (default: 0.8)')
+    parser.add_argument('--duration', type=float, default=2.0,
+                        help='Audio sample duration in seconds (default: 2.0). '
+                             'Longer durations allow DOA estimator to converge to accurate steering. '
+                             'Use 0.8 for quick tests (faster but less accurate DOA convergence).')
     parser.add_argument('--output', type=str, default='data/test_protocol/3_free_beam_loss',
                         help='Output directory (default: data/test_protocol/3_free_beam_loss)')
     parser.add_argument('--reference-angle', type=int, default=0,
