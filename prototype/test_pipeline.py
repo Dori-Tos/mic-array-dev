@@ -178,22 +178,36 @@ if __name__ == "__main__":
     
     doa_logger = logging.getLogger("DOAEstimator")
     doa_logger.setLevel(logging.DEBUG)
+    
     beamformer_logger = logging.getLogger("Beamformer")
     beamformer_logger.setLevel(logging.INFO)
+    
     echo_canceller_logger = logging.getLogger("EchoCanceller")
     echo_canceller_logger.setLevel(logging.INFO)
+    
     filter_logger = logging.getLogger("Filters")
     filter_logger.setLevel(logging.INFO)
+    
     agc_logger = logging.getLogger("AGC")
     agc_logger.setLevel(logging.INFO)
+    
     codec_logger = logging.getLogger("Codec")
     codec_logger.setLevel(logging.INFO)
     
+    # Create console handler and formatter
     console_handler = logging.StreamHandler()
     console_handler.setLevel(logging.DEBUG) 
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     console_handler.setFormatter(formatter)
+    
+    # Add handler to all loggers
     logger.addHandler(console_handler)
+    doa_logger.addHandler(console_handler)
+    beamformer_logger.addHandler(console_handler)
+    echo_canceller_logger.addHandler(console_handler)
+    filter_logger.addHandler(console_handler)
+    agc_logger.addHandler(console_handler)
+    codec_logger.addHandler(console_handler)
 
     
     geometry_path = script_dir / "array_geometries" / "2_Corners.xml"

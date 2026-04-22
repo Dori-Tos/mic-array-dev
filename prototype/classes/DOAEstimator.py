@@ -162,6 +162,8 @@ class IterativeDOAEstimator(DOAEstimator):
         - Returns last valid DOA when frozen or before next update interval
         - Works with any beamformer (DAS, MVDR, etc.)
         """
+        doa_start = time.perf_counter()
+        
         if self.frozen:
             return self.latest_doa
 
@@ -238,5 +240,9 @@ class IterativeDOAEstimator(DOAEstimator):
 
             self._last_update_time = now
 
+        # Log timing information
+        doa_time_ms = (time.perf_counter() - doa_start) * 1000.0
+        self.logger.debug(f"[DOA] Estimated: {self.latest_doa:.1f}° (took {doa_time_ms:.2f}ms)")
+        
         return self.latest_doa
         

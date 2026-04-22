@@ -1,5 +1,6 @@
 import numpy as np
 import logging
+import time
 
 import xml.etree.ElementTree as ET
 
@@ -179,8 +180,13 @@ class DASBeamformer(Beamformer):
         return np.fft.irfft(output_spectrum, n=n_samples)
 
     def apply(self, block: np.ndarray, theta_deg: float | None = None) -> np.ndarray:
+        beam_start = time.perf_counter()
         angle = self.get_steering_angle() if theta_deg is None else float(theta_deg)
-        return self.process(block, angle)
+        result = self.process(block, angle)
+        beam_time_ms = (time.perf_counter() - beam_start) * 1000.0
+        result_arr = np.asarray(result)
+        self.logger.debug(f"[Beamforming] Output shape: {result_arr.shape} (took {beam_time_ms:.2f}ms)")
+        return result
 
 
 class MVDRBeamformer(Beamformer):
@@ -586,5 +592,10 @@ class MVDRBeamformer(Beamformer):
         return np.fft.irfft(output_spectrum, n=n_samples).astype(np.float64, copy=False)
 
     def apply(self, block: np.ndarray, theta_deg: float | None = None) -> np.ndarray:
+        beam_start = time.perf_counter()
         angle = self.get_steering_angle() if theta_deg is None else float(theta_deg)
-        return self.process(block, angle)
+        result = self.process(block, angle)
+        beam_time_ms = (time.perf_counter() - beam_start) * 1000.0
+        result_arr = np.asarray(result)
+        self.logger.debug(f"[Beamforming] Output shape: {result_arr.shape} (took {beam_time_ms:.2f}ms)")
+        return result
