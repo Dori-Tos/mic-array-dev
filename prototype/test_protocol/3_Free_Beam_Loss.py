@@ -485,7 +485,11 @@ def test_di_signal(
             print(f"ANGLE {angle_idx + 1}/{len(measurement_angles)}: {angle_deg:.1f}° (absolute {absolute_angle:.1f}°)")
             print(f"{'='*70}\n")
             
+            skip_angle = False
             for pass_num in range(num_passes):
+                if skip_angle:
+                    break  # Skip to next angle
+                    
                 prompt = (
                     f"  Pass {pass_num + 1}/{num_passes} at {angle_deg:.1f}°: "
                     f"press Enter to record, Backspace to undo last... "
@@ -502,6 +506,24 @@ def test_di_signal(
                             print(
                                 f"  Backspace detected: removed last measurement (angle {removed_angle:.1f}°, pass {removed_pass})."
                             )
+                            # Offer options after deletion
+                            while True:
+                                option_input = input("  Options: 'r'=re-record, 's'=skip this angle, 'a'=abort >> ").strip().lower()
+                                if option_input == 'r':
+                                    print(f"  Re-recording pass {pass_num + 1}/{num_passes}...\n")
+                                    break
+                                elif option_input == 's':
+                                    print(f"  Skipping remaining passes for {angle_deg:.1f}°\n")
+                                    skip_angle = True
+                                    break
+                                elif option_input == 'a':
+                                    print(f"  Aborting measurement. {len(all_measurements)} measurements saved so far.")
+                                    interrupted = True
+                                    raise KeyboardInterrupt
+                                else:
+                                    print("  Invalid. Type 'r', 's', or 'a'.")
+                            if skip_angle:
+                                break  # Break out of recording loop to skip this angle
                         else:
                             print("  Backspace detected: no previous measurement to remove.")
                         print(f"  Waiting for Enter to record pass {pass_num + 1}/{num_passes}...\n")
