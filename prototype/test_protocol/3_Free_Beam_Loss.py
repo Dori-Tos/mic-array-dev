@@ -496,155 +496,155 @@ def test_di_signal(
                     
                     input(f"  Pass {pass_num + 1}/{num_passes} at {angle_deg:.1f}°: press Enter to record...")
 
-                try:
-                    # Record in non-blocking mode with interrupt checks for better Ctrl+C responsiveness
-                    total_samples = int(sample_duration * sample_rate)
-                    chunk_size = int(sample_rate * 0.1)  # 100ms per chunk for interrupt checks
-                    audio_chunks = []
-                    
-                    print(f"    Recording (press Ctrl+C to stop)...", end="", flush=True)
-                    stream = sd.InputStream(
-                        samplerate=sample_rate,
-                        channels=num_channels,
-                        device=device_index,
-                        blocksize=chunk_size,
-                    )
-                    with stream:
-                        samples_recorded = 0
-                        while samples_recorded < total_samples:
-                            try:
-                                chunk, _ = stream.read(chunk_size)
-                                audio_chunks.append(chunk)
-                                samples_recorded += len(chunk)
-                                elapsed = samples_recorded / sample_rate
-                                print(f"\r    Recording: {elapsed:.2f}s / {sample_duration:.2f}s", end="", flush=True)
-                            except KeyboardInterrupt:
-                                print("\n    Recording interrupted by user")
-                                interrupted = True
-                                raise
-                    
-                    audio_data = np.vstack(audio_chunks) if audio_chunks else np.zeros((total_samples, num_channels), dtype=np.float32)
-                    print()  # newline
-                    
-                except KeyboardInterrupt:
-                    print("\nMeasurement interrupted at recording stage")
-                    interrupted = True
-                    raise
-                except Exception as e:
-                    logger.error(f"Error recording audio at angle {absolute_angle:.1f}°, pass {pass_num + 1}: {e}")
-                    continue
-
-                audio_data = np.asarray(audio_data).astype(np.float32)
-                max_val = np.max(np.abs(audio_data)) if audio_data.size > 0 else 0.0
-                if max_val > 1.0:
-                    audio_data = audio_data / max_val
-
-                raw_mono = audio_data[:, 0] if audio_data.ndim > 1 else audio_data
-                input_rms_level = float(np.sqrt(np.mean(raw_mono ** 2)))
-                input_rms_dbfs = _safe_dbfs(input_rms_level)
-
-                # More angle-invariant input reference: average power across all mic channels.
-                # This avoids the "gain" peaking just because mic channel 0 happens to be
-                # in a null for a given rotation angle.
-                if audio_data.ndim == 2 and audio_data.shape[1] > 0:
-                    input_power_avgch = float(np.mean(audio_data ** 2))
-                    input_rms_level_avgch = float(np.sqrt(max(input_power_avgch, 0.0)))
-                else:
-                    input_rms_level_avgch = input_rms_level
-                input_rms_dbfs_avgch = _safe_dbfs(input_rms_level_avgch)
-
-                if use_pipeline:
-                    # Reset DOA state between captures so a large reposition does not require
-                    # many small hill-climb updates to reacquire.
-                    if reset_doa_each_capture and (not bool(freeze_beamformer)) and doa_estimator is not None:
-                        doa_estimator.latest_doa = None
-                        if hasattr(doa_estimator, "_last_update_time"):
-                            try:
-                                doa_estimator._last_update_time = 0.0
-                            except Exception:
-                                pass
-                        if hasattr(doa_estimator, "_latest_gain"):
-                            try:
-                                doa_estimator._latest_gain = None
-                            except Exception:
-                                pass
-
-                    processed_audio, doa_deg, doa_conf_db = _process_capture_block(audio_data)
-                else:
-                    processed_audio = np.asarray(raw_mono, dtype=np.float32)
-                    doa_deg = None
-                    doa_conf_db = None
-
-                processed_audio = np.asarray(processed_audio, dtype=np.float32)
-                rms_level = float(np.sqrt(np.mean(processed_audio ** 2)))
-                peak_level = float(np.max(np.abs(processed_audio))) if processed_audio.size > 0 else 0.0
-                rms_dbfs = _safe_dbfs(rms_level)
-                peak_dbfs = _safe_dbfs(peak_level)
-                # Diagnostic: output/input ratio (depends on input channel level).
-                gain_inout_db = rms_dbfs - input_rms_dbfs
-                gain_inout_db_avgch = rms_dbfs - input_rms_dbfs_avgch
-
-                measurement = {
-                    'measurement_index': len(all_measurements),
-                    'pass_number': pass_num + 1,
-                    'angle_deg': float(angle_deg),
-                    'expected_angle': absolute_angle,
-                    'timestamp': datetime.now().isoformat(),
-                    'reference_angle': reference_angle,
-                    'doa_deg': float(doa_deg) if doa_deg is not None else np.nan,
-                    'doa_conf_db': float(doa_conf_db) if doa_conf_db is not None else np.nan,
-                    'input_rms_level': input_rms_level,
-                    'input_rms_dbfs': input_rms_dbfs,
-                    'input_rms_level_avgch': input_rms_level_avgch,
-                    'input_rms_dbfs_avgch': input_rms_dbfs_avgch,
-                    'rms_level': rms_level,
-                    'rms_dbfs': rms_dbfs,
-                    'peak_level': peak_level,
-                    'peak_dbfs': peak_dbfs,
-                    'gain_inout_db': gain_inout_db,
-                    'gain_inout_db_avgch': gain_inout_db_avgch,
-                }
-
-                all_measurements.append(measurement)
-
-                print(
-                    f"    ✓ Pass {pass_num + 1}/{num_passes} | "
-                    f"Input: {input_rms_dbfs:7.2f} dBFS | Output: {rms_dbfs:7.2f} dBFS | "
-                    f"Out/In: {gain_inout_db:+7.2f} dB"
-                )
-                
-                # Offer option to reject this measurement after it's recorded
-                while True:
-                    accept_input = input("    Keep? (press Enter) or Backspace to redo/skip/abort >> ").strip().lower()
-                    if accept_input == '' or accept_input == 'y':
-                        # Measurement accepted, move on
-                        break
-                    elif accept_input == 'backspace' or accept_input == 'b':
-                        # Reject and offer options
-                        removed_measurement = all_measurements.pop()
-                        print(f"    Measurement rejected and removed.")
+                    try:
+                        # Record in non-blocking mode with interrupt checks for better Ctrl+C responsiveness
+                        total_samples = int(sample_duration * sample_rate)
+                        chunk_size = int(sample_rate * 0.1)  # 100ms per chunk for interrupt checks
+                        audio_chunks = []
                         
-                        while True:
-                            option_input = input("    Options: 'r'=re-record this pass, 's'=skip this angle, 'a'=abort >> ").strip().lower()
-                            if option_input == 'r':
-                                print(f"    Re-recording pass {pass_num + 1}/{num_passes}...\n")
-                                retry_pass = True  # Will re-enter the recording loop for this pass
-                                break
-                            elif option_input == 's':
-                                print(f"    Skipping remaining passes for {angle_deg:.1f}°\n")
-                                skip_angle = True
-                                break
-                            elif option_input == 'a':
-                                print(f"    Aborting measurement. {len(all_measurements)} measurements saved so far.")
-                                interrupted = True
-                                raise KeyboardInterrupt
-                            else:
-                                print("    Invalid. Type 'r', 's', or 'a'.")
+                        print(f"    Recording (press Ctrl+C to stop)...", end="", flush=True)
+                        stream = sd.InputStream(
+                            samplerate=sample_rate,
+                            channels=num_channels,
+                            device=device_index,
+                            blocksize=chunk_size,
+                        )
+                        with stream:
+                            samples_recorded = 0
+                            while samples_recorded < total_samples:
+                                try:
+                                    chunk, _ = stream.read(chunk_size)
+                                    audio_chunks.append(chunk)
+                                    samples_recorded += len(chunk)
+                                    elapsed = samples_recorded / sample_rate
+                                    print(f"\r    Recording: {elapsed:.2f}s / {sample_duration:.2f}s", end="", flush=True)
+                                except KeyboardInterrupt:
+                                    print("\n    Recording interrupted by user")
+                                    interrupted = True
+                                    raise
                         
-                        if skip_angle or retry_pass:
-                            break  # Exit accept loop - either skip angle or re-record
+                        audio_data = np.vstack(audio_chunks) if audio_chunks else np.zeros((total_samples, num_channels), dtype=np.float32)
+                        print()  # newline
+                        
+                    except KeyboardInterrupt:
+                        print("\nMeasurement interrupted at recording stage")
+                        interrupted = True
+                        raise
+                    except Exception as e:
+                        logger.error(f"Error recording audio at angle {absolute_angle:.1f}°, pass {pass_num + 1}: {e}")
+                        continue
+
+                    audio_data = np.asarray(audio_data).astype(np.float32)
+                    max_val = np.max(np.abs(audio_data)) if audio_data.size > 0 else 0.0
+                    if max_val > 1.0:
+                        audio_data = audio_data / max_val
+
+                    raw_mono = audio_data[:, 0] if audio_data.ndim > 1 else audio_data
+                    input_rms_level = float(np.sqrt(np.mean(raw_mono ** 2)))
+                    input_rms_dbfs = _safe_dbfs(input_rms_level)
+
+                    # More angle-invariant input reference: average power across all mic channels.
+                    # This avoids the "gain" peaking just because mic channel 0 happens to be
+                    # in a null for a given rotation angle.
+                    if audio_data.ndim == 2 and audio_data.shape[1] > 0:
+                        input_power_avgch = float(np.mean(audio_data ** 2))
+                        input_rms_level_avgch = float(np.sqrt(max(input_power_avgch, 0.0)))
                     else:
-                        print("    Press Enter to accept or type 'b' to backspace.")
+                        input_rms_level_avgch = input_rms_level
+                    input_rms_dbfs_avgch = _safe_dbfs(input_rms_level_avgch)
+
+                    if use_pipeline:
+                        # Reset DOA state between captures so a large reposition does not require
+                        # many small hill-climb updates to reacquire.
+                        if reset_doa_each_capture and (not bool(freeze_beamformer)) and doa_estimator is not None:
+                            doa_estimator.latest_doa = None
+                            if hasattr(doa_estimator, "_last_update_time"):
+                                try:
+                                    doa_estimator._last_update_time = 0.0
+                                except Exception:
+                                    pass
+                            if hasattr(doa_estimator, "_latest_gain"):
+                                try:
+                                    doa_estimator._latest_gain = None
+                                except Exception:
+                                    pass
+
+                        processed_audio, doa_deg, doa_conf_db = _process_capture_block(audio_data)
+                    else:
+                        processed_audio = np.asarray(raw_mono, dtype=np.float32)
+                        doa_deg = None
+                        doa_conf_db = None
+
+                    processed_audio = np.asarray(processed_audio, dtype=np.float32)
+                    rms_level = float(np.sqrt(np.mean(processed_audio ** 2)))
+                    peak_level = float(np.max(np.abs(processed_audio))) if processed_audio.size > 0 else 0.0
+                    rms_dbfs = _safe_dbfs(rms_level)
+                    peak_dbfs = _safe_dbfs(peak_level)
+                    # Diagnostic: output/input ratio (depends on input channel level).
+                    gain_inout_db = rms_dbfs - input_rms_dbfs
+                    gain_inout_db_avgch = rms_dbfs - input_rms_dbfs_avgch
+
+                    measurement = {
+                        'measurement_index': len(all_measurements),
+                        'pass_number': pass_num + 1,
+                        'angle_deg': float(angle_deg),
+                        'expected_angle': absolute_angle,
+                        'timestamp': datetime.now().isoformat(),
+                        'reference_angle': reference_angle,
+                        'doa_deg': float(doa_deg) if doa_deg is not None else np.nan,
+                        'doa_conf_db': float(doa_conf_db) if doa_conf_db is not None else np.nan,
+                        'input_rms_level': input_rms_level,
+                        'input_rms_dbfs': input_rms_dbfs,
+                        'input_rms_level_avgch': input_rms_level_avgch,
+                        'input_rms_dbfs_avgch': input_rms_dbfs_avgch,
+                        'rms_level': rms_level,
+                        'rms_dbfs': rms_dbfs,
+                        'peak_level': peak_level,
+                        'peak_dbfs': peak_dbfs,
+                        'gain_inout_db': gain_inout_db,
+                        'gain_inout_db_avgch': gain_inout_db_avgch,
+                    }
+
+                    all_measurements.append(measurement)
+
+                    print(
+                        f"    ✓ Pass {pass_num + 1}/{num_passes} | "
+                        f"Input: {input_rms_dbfs:7.2f} dBFS | Output: {rms_dbfs:7.2f} dBFS | "
+                        f"Out/In: {gain_inout_db:+7.2f} dB"
+                    )
+                    
+                    # Offer option to reject this measurement after it's recorded
+                    while True:
+                        accept_input = input("    Keep? (press Enter) or Backspace to redo/skip/abort >> ").strip().lower()
+                        if accept_input == '' or accept_input == 'y':
+                            # Measurement accepted, move on
+                            break
+                        elif accept_input == 'backspace' or accept_input == 'b':
+                            # Reject and offer options
+                            removed_measurement = all_measurements.pop()
+                            print(f"    Measurement rejected and removed.")
+                            
+                            while True:
+                                option_input = input("    Options: 'r'=re-record this pass, 's'=skip this angle, 'a'=abort >> ").strip().lower()
+                                if option_input == 'r':
+                                    print(f"    Re-recording pass {pass_num + 1}/{num_passes}...\n")
+                                    retry_pass = True  # Will re-enter the recording loop for this pass
+                                    break
+                                elif option_input == 's':
+                                    print(f"    Skipping remaining passes for {angle_deg:.1f}°\n")
+                                    skip_angle = True
+                                    break
+                                elif option_input == 'a':
+                                    print(f"    Aborting measurement. {len(all_measurements)} measurements saved so far.")
+                                    interrupted = True
+                                    raise KeyboardInterrupt
+                                else:
+                                    print("    Invalid. Type 'r', 's', or 'a'.")
+                            
+                            if skip_angle or retry_pass:
+                                break  # Exit accept loop - either skip angle or re-record
+                        else:
+                            print("    Press Enter to accept or type 'b' to backspace.")
         
     except KeyboardInterrupt:
         print("\n\nMeasurement interrupted by user")
