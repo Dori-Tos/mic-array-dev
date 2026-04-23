@@ -39,6 +39,7 @@ from classes.EchoCanceller import EchoCanceller
 from classes.Array_RealTime import Array_RealTime, apply_realtime_processing_chain
 from classes.Filter import BandPassFilter, SpectralSubtractionFilter
 from classes.AGC import AdaptiveAmplifier, PedalboardAGC, AGCChain
+from classes.Codec import G711Codec
 
 
 def _safe_dbfs(value: float, floor: float = 1e-10) -> float:
@@ -339,6 +340,8 @@ def test_di_signal(
             ])
         else:
             agc = None
+            
+        codec = G711Codec(logger=logger)
 
         mic_list = [Microphone(logger=logger, channel_number=i, sampling_rate=sample_rate) for i in mic_channel_numbers]
         array = Array_RealTime(
@@ -352,6 +355,7 @@ def test_di_signal(
             echo_canceller=None,
             filters=filters,
             agc=agc,
+            codec=codec,
             monitor_gain=1.0,
             output_mode="local",
             output_boundary_fade_ms=0.0,
