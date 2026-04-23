@@ -489,45 +489,12 @@ def test_di_signal(
             for pass_num in range(num_passes):
                 if skip_angle:
                     break  # Skip to next angle
+                
+                retry_pass = True  # Allow retries for this pass
+                while retry_pass:
+                    retry_pass = False  # Reset for next iteration
                     
-                prompt = (
-                    f"  Pass {pass_num + 1}/{num_passes} at {angle_deg:.1f}°: "
-                    f"press Enter to record, Backspace to undo last... "
-                )
-                while True:
-                    key_action = _wait_for_enter_or_backspace(prompt)
-                    if key_action == 'enter':
-                        break
-                    if key_action == 'backspace':
-                        if all_measurements:
-                            removed_measurement = all_measurements.pop()
-                            removed_angle = removed_measurement.get('expected_angle', removed_measurement.get('angle_deg', 0.0))
-                            removed_pass = removed_measurement.get('pass_number', '?')
-                            print(
-                                f"  Backspace detected: removed last measurement (angle {removed_angle:.1f}°, pass {removed_pass})."
-                            )
-                            # Offer options after deletion
-                            while True:
-                                option_input = input("  Options: 'r'=re-record, 's'=skip this angle, 'a'=abort >> ").strip().lower()
-                                if option_input == 'r':
-                                    print(f"  Re-recording pass {pass_num + 1}/{num_passes}...\n")
-                                    break
-                                elif option_input == 's':
-                                    print(f"  Skipping remaining passes for {angle_deg:.1f}°\n")
-                                    skip_angle = True
-                                    break
-                                elif option_input == 'a':
-                                    print(f"  Aborting measurement. {len(all_measurements)} measurements saved so far.")
-                                    interrupted = True
-                                    raise KeyboardInterrupt
-                                else:
-                                    print("  Invalid. Type 'r', 's', or 'a'.")
-                            if skip_angle:
-                                break  # Break out of recording loop to skip this angle
-                        else:
-                            print("  Backspace detected: no previous measurement to remove.")
-                        print(f"  Waiting for Enter to record pass {pass_num + 1}/{num_passes}...\n")
-                        continue
+                    input(f"  Pass {pass_num + 1}/{num_passes} at {angle_deg:.1f}°: press Enter to record...")
 
                 try:
                     # Record in non-blocking mode with interrupt checks for better Ctrl+C responsiveness
@@ -645,6 +612,39 @@ def test_di_signal(
                     f"Input: {input_rms_dbfs:7.2f} dBFS | Output: {rms_dbfs:7.2f} dBFS | "
                     f"Out/In: {gain_inout_db:+7.2f} dB"
                 )
+                
+                # Offer option to reject this measurement after it's recorded
+                while True:
+                    accept_input = input("    Keep? (press Enter) or Backspace to redo/skip/abort >> ").strip().lower()
+                    if accept_input == '' or accept_input == 'y':
+                        # Measurement accepted, move on
+                        break
+                    elif accept_input == 'backspace' or accept_input == 'b':
+                        # Reject and offer options
+                        removed_measurement = all_measurements.pop()
+                        print(f"    Measurement rejected and removed.")
+                        
+                        while True:
+                            option_input = input("    Options: 'r'=re-record this pass, 's'=skip this angle, 'a'=abort >> ").strip().lower()
+                            if option_input == 'r':
+                                print(f"    Re-recording pass {pass_num + 1}/{num_passes}...\n")
+                                retry_pass = True  # Will re-enter the recording loop for this pass
+                                break
+                            elif option_input == 's':
+                                print(f"    Skipping remaining passes for {angle_deg:.1f}°\n")
+                                skip_angle = True
+                                break
+                            elif option_input == 'a':
+                                print(f"    Aborting measurement. {len(all_measurements)} measurements saved so far.")
+                                interrupted = True
+                                raise KeyboardInterrupt
+                            else:
+                                print("    Invalid. Type 'r', 's', or 'a'.")
+                        
+                        if skip_angle or retry_pass:
+                            break  # Exit accept loop - either skip angle or re-record
+                    else:
+                        print("    Press Enter to accept or type 'b' to backspace.")
         
     except KeyboardInterrupt:
         print("\n\nMeasurement interrupted by user")
