@@ -556,7 +556,7 @@ def test_di_signal(
                     if use_pipeline:
                         # Reset DOA state between captures so a large reposition does not require
                         # many small hill-climb updates to reacquire.
-                        if reset_doa_each_capture and (not bool(freeze_beamformer)) and doa_estimator is not None:
+                        if reset_doa_each_capture and doa_estimator is not None:
                             doa_estimator.latest_doa = None
                             if hasattr(doa_estimator, "_last_update_time"):
                                 try:

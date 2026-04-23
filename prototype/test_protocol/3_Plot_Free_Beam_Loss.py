@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -296,12 +297,12 @@ def main(argv: list[str] | None = None) -> int:
 	elif args.out is not None:
 		out_path = Path(args.out)
 	else:
-		stem = "free_beam_gain"
-		if mode == "angle":
-			stem += "_vs_angle"
+		# Single file: use source CSV name; multiple files: use timestamped generic name
+		if len(csv_paths) == 1:
+			out_path = csv_paths[0].with_suffix(".png")
 		else:
-			stem += "_vs_frequency"
-		out_path = csv_paths[0].with_name(f"{stem}.png")
+			timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+			out_path = csv_paths[0].parent / f"free_beam_loss_{timestamp}.png"
 
 	freqs = _parse_freq_list(args.freqs) if args.freqs is not None else None
 
