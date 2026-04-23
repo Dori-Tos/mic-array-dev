@@ -149,6 +149,7 @@ def plot_gain_vs_angle(
 		if np.isfinite(doa).any():
 			ax2 = ax.twinx()
 			ax2.plot(angles, doa, color="tab:orange", linestyle="--", marker="x", alpha=0.7)
+			ax2.axhline(0.0, color="0.75", linewidth=1.0, alpha=0.5, linestyle="-")
 			ax2.set_ylabel("Estimated Angle (doa)")
 
 	fig.tight_layout()

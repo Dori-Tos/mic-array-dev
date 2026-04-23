@@ -113,6 +113,8 @@ def test_polar_pattern(
     enable_spectral_filter=True,
     save_on_interrupt=False,
     process_block_ms=20.0,
+    num_mics=8,
+    geometry=2,
 ):
     """
     Measure microphone array polar pattern using the complete processing pipeline.
@@ -156,6 +158,9 @@ def test_polar_pattern(
         process_block_ms: Chunk size (ms) used to apply the realtime processing chain.
                   This is important for overlap-add filters (spectral subtraction) so that
                   offline processing matches realtime behavior and does not smear across angles.
+        num_mics: Number of microphones to use for beamforming (default: 8).
+        geometry: Geometry selector using XML filename prefix before '_'.
+              Example: geometry=2 selects files like '2_*.xml'.
     
     Returns:
         DataFrame with averaged measurements
@@ -221,6 +226,7 @@ def test_polar_pattern(
     print(f"  Microphone reference angle: {reference_angle}°")
     print(f"  Total test duration: ~{num_passes * resolution * interval / 60:.1f} minutes")
     print(f"  Output directory: {output_path}")
+    print(f"  Geometry selector: {geometry}")
     if use_pipeline:
         print(f"  Processing: Full pipeline")
         print(f"    - Beamformer: MVDR")
@@ -271,10 +277,28 @@ def test_polar_pattern(
     # Initialize processing pipeline if requested
     if use_pipeline:
         print("Initializing audio processing pipeline...")
+
+        def _resolve_geometry_path(geometry_value: int) -> Path:
+            geometry_dir = Path(__file__).resolve().parent.parent / "array_geometries"
+            target_prefix = str(int(geometry_value))
+            matches = sorted(
+                p for p in geometry_dir.glob("*.xml")
+                if p.stem.split("_", 1)[0] == target_prefix
+            )
+            if not matches:
+                available = sorted(p.name for p in geometry_dir.glob("*.xml"))
+                raise ValueError(
+                    f"No geometry XML found for selector '{geometry_value}'. "
+                    f"Expected a file like '{geometry_value}_*.xml' in {geometry_dir}. "
+                    f"Available: {available}"
+                )
+            return matches[0]
         
         # Microphone array geometry (same source as realtime pipeline)
-        mic_channel_numbers = [0, 1, 2, 3]
-        geometry_path = Path(__file__).resolve().parent.parent / "array_geometries" / "1_square.xml"
+        mic_channel_numbers = list(range(int(num_mics)))
+        
+        geometry_path = _resolve_geometry_path(int(geometry))
+        print(f"  Using geometry file: {geometry_path.name}")
         mic_positions = MVDRBeamformer.load_positions_from_xml(str(geometry_path))
         
         # MVDR Beamformer (same config as test_pipeline.py)
@@ -789,6 +813,10 @@ if __name__ == '__main__':
                         help='Processing chunk size in milliseconds used to apply the realtime processing chain (default: 5.0).')
     parser.add_argument('--save-on-interrupt', action=argparse.BooleanOptionalAction, default=False,
                         help='Save partial data when interrupted by Ctrl+C (default: disabled)')
+    parser.add_argument('--num-mics', type=int, default=8,
+                        help='Number of microphones to use (default: 8)')
+    parser.add_argument('--geometry', type=int, default=2,
+                        help="Geometry selector by XML filename prefix (default: 1). Example: --geometry 2 loads '2_*.xml'.")
     
     args = parser.parse_args()
     
@@ -831,6 +859,8 @@ if __name__ == '__main__':
         enable_spectral_filter=args.enable_spectral_filter,
         save_on_interrupt=args.save_on_interrupt,
         process_block_ms=args.process_block_ms,
+        num_mics=args.num_mics,
+        geometry=args.geometry,
     )
     
     # Usage examples:

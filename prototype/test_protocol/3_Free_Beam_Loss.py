@@ -122,7 +122,7 @@ def _parse_angle_list(raw_value: str) -> list[float]:
     return angles
 
 
-def test_di_signal(
+def test_free_beam(
     num_passes=1,
     angles=None,
     device_index=None,
@@ -221,7 +221,7 @@ def test_di_signal(
     print(f"{'='*70}\n")
     
     # Setup logging
-    logger = logging.getLogger("DISignalTest")
+    logger = logging.getLogger("FreeBeamLossTest")
     logger.setLevel(logging.INFO)
     
     console_handler = logging.StreamHandler()
@@ -771,7 +771,7 @@ if __name__ == '__main__':
     angle_list = _parse_angle_list(args.angles)
     
     # Run test
-    test_di_signal(
+    test_free_beam(
         num_passes=args.passes,
         angles=angle_list,
         device_index=args.device,
