@@ -191,8 +191,16 @@ def test_polar_pattern(
     
     sample_rate = int(device_info['default_samplerate'])
     
-    # Use 4 channels for array processing; keep single-channel raw mode.
-    num_channels = 4 if use_pipeline else 1
+    # In pipeline mode, capture one channel per configured microphone.
+    num_channels = int(num_mics) if use_pipeline else 1
+
+    max_input_channels = int(device_info.get('max_input_channels', 0))
+    if max_input_channels < num_channels:
+        raise ValueError(
+            f"Selected input device supports only {max_input_channels} input channels, "
+            f"but this run requires {num_channels}. "
+            "Lower --num-mics or choose a different --device."
+        )
 
     # Process captured audio using short, fixed-size blocks so overlap-add filters behave like realtime.
     process_block_ms = float(process_block_ms)
