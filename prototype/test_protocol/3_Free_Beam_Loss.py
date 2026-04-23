@@ -131,8 +131,6 @@ def test_di_signal(
     reference_angle=0,
     use_pipeline=True,
     wait_between_passes=False,
-    freeze_beamformer=True,
-    freeze_angle_deg=0.0,
     enable_agc=False,
     enable_spectral_filter=True,
     save_on_interrupt=False,
@@ -141,7 +139,7 @@ def test_di_signal(
     reset_doa_each_capture: bool = False,
 ):
     """
-    Measure signal strength at a fixed set of angles using the processing pipeline.
+    Measure signal strength at a fixed set of angles with automatic DOA-based beamforming.
     
     Args:
         num_passes: Number of repeated captures to take at each angle.
@@ -154,8 +152,6 @@ def test_di_signal(
         reference_angle: Reference offset applied to the fixed angle list.
         use_pipeline: Whether to apply full processing pipeline with beamformer (default: True)
         wait_between_passes: If True, pause between repeated passes.
-        freeze_beamformer: If True, keep steering fixed to freeze_angle_deg for all measurements
-        freeze_angle_deg: Steering angle used when freeze_beamformer is enabled
         enable_agc: If True, enable both AGC stages (AdaptiveAmplifier + PedalboardAGC).
                 Default False for linear directivity measurements.
         enable_spectral_filter: If True, enable SpectralSubtractionFilter (default True).
@@ -200,7 +196,7 @@ def test_di_signal(
     print(f"  Number of passes: {num_passes}")
     print(f"  Fixed measurement angles: {measurement_angles}")
     print(f"  Sample duration: {sample_duration} seconds")
-    if use_pipeline and not bool(freeze_beamformer):
+    if use_pipeline:
         doa_updates_est = int(sample_duration * 3.0)  # 3.0 Hz update rate
         print(f"    → Estimated DOA updates per capture: ~{doa_updates_est} (sufficient for convergence)")
     if use_pipeline:
@@ -210,13 +206,11 @@ def test_di_signal(
     print(f"  Output directory: {output_path}")
     if use_pipeline:
         print(f"  Processing: Full pipeline")
-        print(f"    - Beamformer: MVDR")
+        print(f"    - Beamformer: MVDR (free with DOA tracking)")
+        print(f"    - DOA Estimator: ON (updates at 3.0 Hz)")
         print(f"    - BandPass filter: ON")
         print(f"    - Spectral subtraction: {'ON' if enable_spectral_filter else 'OFF'}")
         print(f"    - AGC chain (both stages): {'ON' if enable_agc else 'OFF'}")
-        print(f"  Beamformer freeze: {'ON' if freeze_beamformer else 'OFF'}")
-        if freeze_beamformer:
-            print(f"  Beamformer freeze angle: {float(freeze_angle_deg):.1f}°")
     else:
         print(f"  Processing: Raw audio only")
     print(f"  Save on interrupt: {'ON' if save_on_interrupt else 'OFF (default)'}")
@@ -363,7 +357,7 @@ def test_di_signal(
             raise ValueError("Expected audio block with shape (samples, channels) when use_pipeline=True")
 
         if process_block_samples <= 0 or audio_block.shape[0] <= process_block_samples:
-            if not bool(freeze_beamformer) and doa_estimator is not None and beamformer is not None:
+            if doa_estimator is not None and beamformer is not None:
                 try:
                     doa_value = doa_estimator.estimate_doa(audio_block)
                     doa_conf = getattr(doa_estimator, 'latest_confidence_db', None)
@@ -388,8 +382,8 @@ def test_di_signal(
                 sample_rate=sample_rate,
                 monitor_gain=1.0,
                 theta_deg=None,
-                freeze_beamformer=bool(freeze_beamformer),
-                freeze_angle_deg=float(freeze_angle_deg) if freeze_angle_deg is not None else None,
+                freeze_beamformer=False,
+                freeze_angle_deg=None,
             )
             return np.asarray(out, dtype=np.float32).reshape(-1), doa_value, doa_conf
 
@@ -402,7 +396,7 @@ def test_di_signal(
             if chunk.shape[0] == 0:
                 continue
 
-            if not bool(freeze_beamformer) and doa_estimator is not None and beamformer is not None:
+            if doa_estimator is not None and beamformer is not None:
                 try:
                     doa_value = doa_estimator.estimate_doa(chunk)
                     doa_conf = getattr(doa_estimator, 'latest_confidence_db', None)
@@ -425,8 +419,8 @@ def test_di_signal(
                 sample_rate=sample_rate,
                 monitor_gain=1.0,
                 theta_deg=None,
-                freeze_beamformer=bool(freeze_beamformer),
-                freeze_angle_deg=float(freeze_angle_deg) if freeze_angle_deg is not None else None,
+                freeze_beamformer=False,
+                freeze_angle_deg=None,
             )
             out_chunks.append(np.asarray(out, dtype=np.float32).reshape(-1))
 
@@ -760,10 +754,6 @@ if __name__ == '__main__':
                         help='Disable processing pipeline, record raw audio only')
     parser.add_argument('--wait-between-passes', action=argparse.BooleanOptionalAction, default=True,
                         help='Wait for Enter key before starting each new pass (default: enabled)')
-    parser.add_argument('--freeze-beamformer', action=argparse.BooleanOptionalAction, default=False,
-                        help='Freeze beamformer steering during the full measurement run (default: disabled)')
-    parser.add_argument('--freeze-angle', type=float, default=0.0,
-                        help='Steering angle used when beamformer freeze is enabled (default: 0.0)')
     parser.add_argument('--process-block-ms', type=float, default=20.0,
                         help='Processing chunk size in ms (default: 20.0). Important for overlap-add filters.')
     parser.add_argument('--doa-min-confidence-db', type=float, default=1.0,
@@ -793,8 +783,6 @@ if __name__ == '__main__':
         reference_angle=args.reference_angle,
         use_pipeline=not args.no_pipeline,
         wait_between_passes=args.wait_between_passes,
-        freeze_beamformer=args.freeze_beamformer,
-        freeze_angle_deg=args.freeze_angle,
         enable_agc=args.enable_agc,
         enable_spectral_filter=args.enable_spectral_filter,
         save_on_interrupt=args.save_on_interrupt,
