@@ -15,6 +15,10 @@ from math import gcd
 _UNSET = object()
 
 
+def _dbfs(value: float, floor: float = 1e-10) -> float:
+    return 20.0 * np.log10(max(float(value), floor))
+
+
 def apply_realtime_processing_chain(
     block: np.ndarray,
     beamformer,
@@ -172,6 +176,119 @@ class Array_RealTime(Array):
         self._processing_stop_event = threading.Event()
         self._processing_input_channel = 0
         self._last_input_blocksize = 0
+
+        # Measurement tracking for side-door data extraction (no buffering).
+        self._measurement_active = False
+        self._measurement_started_at = None
+        self._measurement_input_sum_squares = 0.0
+        self._measurement_input_samples = 0
+        self._measurement_input_peak = 0.0
+        self._measurement_input_allch_sum_squares = 0.0
+        self._measurement_input_allch_samples = 0
+        self._measurement_output_sum_squares = 0.0
+        self._measurement_output_samples = 0
+        self._measurement_output_peak = 0.0
+        self._measurement_block_count = 0
+        self._measurement_doa_latest = None
+        self._measurement_doa_conf_latest = None
+        self._measurement_lock = threading.Lock()
+
+    def start_side_door_measurement(self):
+        """Start accumulating block-wise RMS/DOA statistics without buffering audio."""
+        with self._measurement_lock:
+            self._measurement_active = True
+            self._measurement_started_at = time.monotonic()
+            self._measurement_input_sum_squares = 0.0
+            self._measurement_input_samples = 0
+            self._measurement_input_peak = 0.0
+            self._measurement_input_allch_sum_squares = 0.0
+            self._measurement_input_allch_samples = 0
+            self._measurement_output_sum_squares = 0.0
+            self._measurement_output_samples = 0
+            self._measurement_output_peak = 0.0
+            self._measurement_block_count = 0
+            self._measurement_doa_latest = None
+            self._measurement_doa_conf_latest = None
+
+    def stop_side_door_measurement(self):
+        """Stop the live measurement accumulator without clearing the last snapshot."""
+        with self._measurement_lock:
+            self._measurement_active = False
+
+    def get_side_door_measurement_snapshot(self, reset: bool = False) -> dict:
+        """Return the current accumulated measurement values as a non-buffered snapshot."""
+        with self._measurement_lock:
+            input_rms = float(np.sqrt(self._measurement_input_sum_squares / self._measurement_input_samples)) if self._measurement_input_samples > 0 else 0.0
+            input_allch_rms = float(np.sqrt(self._measurement_input_allch_sum_squares / self._measurement_input_allch_samples)) if self._measurement_input_allch_samples > 0 else 0.0
+            output_rms = float(np.sqrt(self._measurement_output_sum_squares / self._measurement_output_samples)) if self._measurement_output_samples > 0 else 0.0
+            snapshot = {
+                "active": bool(self._measurement_active),
+                "started_at": self._measurement_started_at,
+                "elapsed_s": (time.monotonic() - self._measurement_started_at) if self._measurement_started_at is not None else 0.0,
+                "block_count": int(self._measurement_block_count),
+                "input_samples": int(self._measurement_input_samples),
+                "input_allch_samples": int(self._measurement_input_allch_samples),
+                "output_samples": int(self._measurement_output_samples),
+                "input_rms": input_rms,
+                "input_rms_dbfs": _dbfs(input_rms),
+                "input_allch_rms": input_allch_rms,
+                "input_allch_rms_dbfs": _dbfs(input_allch_rms),
+                "input_peak": float(self._measurement_input_peak),
+                "input_peak_dbfs": _dbfs(self._measurement_input_peak),
+                "output_rms": output_rms,
+                "output_rms_dbfs": _dbfs(output_rms),
+                "output_peak": float(self._measurement_output_peak),
+                "output_peak_dbfs": _dbfs(self._measurement_output_peak),
+                "doa_deg": self._measurement_doa_latest,
+                "doa_conf_db": self._measurement_doa_conf_latest,
+            }
+            if reset:
+                self._measurement_started_at = time.monotonic() if self._measurement_active else None
+                self._measurement_input_sum_squares = 0.0
+                self._measurement_input_samples = 0
+                self._measurement_input_peak = 0.0
+                self._measurement_input_allch_sum_squares = 0.0
+                self._measurement_input_allch_samples = 0
+                self._measurement_output_sum_squares = 0.0
+                self._measurement_output_samples = 0
+                self._measurement_output_peak = 0.0
+                self._measurement_block_count = 0
+                self._measurement_doa_latest = None
+                self._measurement_doa_conf_latest = None
+            return snapshot
+
+    def _accumulate_side_door_measurement(self, input_mono: np.ndarray, input_allch: np.ndarray, output_mono: np.ndarray, doa_value, doa_conf_db):
+        if not self._measurement_active:
+            return
+
+        with self._measurement_lock:
+            if not self._measurement_active:
+                return
+
+            input_mono = np.asarray(input_mono, dtype=np.float32).reshape(-1)
+            output_mono = np.asarray(output_mono, dtype=np.float32).reshape(-1)
+
+            if input_mono.size > 0:
+                self._measurement_input_sum_squares += float(np.sum(input_mono * input_mono))
+                self._measurement_input_samples += int(input_mono.size)
+                self._measurement_input_peak = max(self._measurement_input_peak, float(np.max(np.abs(input_mono))))
+
+            input_allch = np.asarray(input_allch, dtype=np.float32)
+            if input_allch.ndim == 2 and input_allch.size > 0:
+                self._measurement_input_allch_sum_squares += float(np.sum(input_allch * input_allch))
+                self._measurement_input_allch_samples += int(input_allch.size)
+            elif input_allch.ndim == 1 and input_allch.size > 0:
+                self._measurement_input_allch_sum_squares += float(np.sum(input_allch * input_allch))
+                self._measurement_input_allch_samples += int(input_allch.size)
+
+            if output_mono.size > 0:
+                self._measurement_output_sum_squares += float(np.sum(output_mono * output_mono))
+                self._measurement_output_samples += int(output_mono.size)
+                self._measurement_output_peak = max(self._measurement_output_peak, float(np.max(np.abs(output_mono))))
+
+            self._measurement_block_count += 1
+            self._measurement_doa_latest = doa_value
+            self._measurement_doa_conf_latest = doa_conf_db
 
     @property
     def is_running(self) -> bool:
@@ -556,6 +673,14 @@ class Array_RealTime(Array):
                 if resample_elapsed > 0.0001:  # Only accumulate if actually resampled
                     timing_accumulators['resampling_ms'].append(resample_elapsed * 1000.0)
 
+                self._accumulate_side_door_measurement(
+                    input_mono=self._extract_processing_mono(block),
+                    input_allch=block,
+                    output_mono=mono_out,
+                    doa_value=doa_value,
+                    doa_conf_db=getattr(self.doa_estimator, "latest_confidence_db", None),
+                )
+
                 if self.output_mode == "codec":
                     self._send_codec_chunk(mono_out, int(processing_rate))
                 else:
@@ -654,6 +779,10 @@ class Array_RealTime(Array):
             if self._latest_beamformed is None:
                 return None
             return self._latest_beamformed.copy()
+
+    def get_side_door_measurement_stats(self) -> dict:
+        """Get the current live measurement statistics without copying audio buffers."""
+        return self.get_side_door_measurement_snapshot(reset=False)
 
     def start_output_monitoring(self, blocksize: int = 0):
         """

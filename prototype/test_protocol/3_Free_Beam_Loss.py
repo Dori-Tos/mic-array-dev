@@ -36,7 +36,7 @@ from classes.Microphone import Microphone
 from classes.DOAEstimator import IterativeDOAEstimator
 from classes.Beamformer import DASBeamformer, MVDRBeamformer
 from classes.EchoCanceller import EchoCanceller
-from classes.Array_RealTime import apply_realtime_processing_chain
+from classes.Array_RealTime import Array_RealTime, apply_realtime_processing_chain
 from classes.Filter import BandPassFilter, SpectralSubtractionFilter
 from classes.AGC import AdaptiveAmplifier, PedalboardAGC, AGCChain
 
@@ -126,6 +126,7 @@ def test_di_signal(
     angles=None,
     device_index=None,
     sample_duration=2.0,
+    settle_seconds=1.0,
     output_dir='data/test_protocol/3_free_beam_loss',
     pattern=1,
     reference_angle=0,
@@ -148,6 +149,7 @@ def test_di_signal(
         sample_duration: Duration to record audio at each point in seconds.
                 Default 2.0s to allow DOA estimator time to converge to accurate steering
                 (at update_rate=3.0 Hz, this gives ~6 updates for convergence).
+        settle_seconds: Live settle time before each measurement window.
         output_dir: Directory to save measurement data
         reference_angle: Reference offset applied to the fixed angle list.
         use_pipeline: Whether to apply full processing pipeline with beamformer (default: True)
@@ -196,6 +198,7 @@ def test_di_signal(
     print(f"  Number of passes: {num_passes}")
     print(f"  Fixed measurement angles: {measurement_angles}")
     print(f"  Sample duration: {sample_duration} seconds")
+    print(f"  Live settle time: {settle_seconds} seconds")
     if use_pipeline:
         doa_updates_est = int(sample_duration * 3.0)  # 3.0 Hz update rate
         print(f"    → Estimated DOA updates per capture: ~{doa_updates_est} (sufficient for convergence)")
@@ -336,6 +339,26 @@ def test_di_signal(
             ])
         else:
             agc = None
+
+        mic_list = [Microphone(logger=logger, channel_number=i, sampling_rate=sample_rate) for i in mic_channel_numbers]
+        array = Array_RealTime(
+            id_vendor=0x2752,
+            id_product=0x0019,
+            logger=logger,
+            mic_list=mic_list,
+            sampling_rate=sample_rate,
+            doa_estimator=doa_estimator,
+            beamformer=beamformer,
+            echo_canceller=None,
+            filters=filters,
+            agc=agc,
+            monitor_gain=1.0,
+            output_mode="local",
+            output_boundary_fade_ms=0.0,
+            downsample_rate=None,
+            initial_silence_duration=0.0,
+        )
+        array.start_realtime(blocksize=process_block_samples)
         
         print("Pipeline initialized.\n")
     else:
@@ -343,6 +366,7 @@ def test_di_signal(
         doa_estimator = None
         filters = []
         agc = None
+        array = None
 
     def _process_capture_block(audio_block: np.ndarray) -> tuple[np.ndarray, float | None, float | None]:
         """Process captured audio in short chunks to mimic realtime; optionally returns last DOA/confidence."""
@@ -437,35 +461,11 @@ def test_di_signal(
 
     # Warm up filters/AGC before measurements to avoid low initial gain frames.
     warmup_seconds = 2.0
-    print(f"Warm-up: running {warmup_seconds:.1f}s pre-capture through processing chain...")
+    print(f"Warm-up: letting the live processing chain settle for {warmup_seconds:.1f}s...")
     interrupted = False
     try:
-        # Record warmup audio in non-blocking mode for Ctrl+C responsiveness
-        total_warmup_samples = int(warmup_seconds * sample_rate)
-        chunk_size = int(sample_rate * 0.1)  # 100ms per chunk
-        warmup_chunks = []
-        
-        stream = sd.InputStream(
-            samplerate=sample_rate,
-            channels=num_channels,
-            device=device_index,
-            blocksize=chunk_size,
-        )
-        with stream:
-            samples_recorded = 0
-            while samples_recorded < total_warmup_samples:
-                chunk, _ = stream.read(chunk_size)
-                warmup_chunks.append(chunk)
-                samples_recorded += len(chunk)
-        
-        warmup_audio = np.vstack(warmup_chunks) if warmup_chunks else np.zeros((total_warmup_samples, num_channels), dtype=np.float32)
-        warmup_audio = np.asarray(warmup_audio).astype(np.float32)
-        warmup_peak = np.max(np.abs(warmup_audio)) if warmup_audio.size > 0 else 0.0
-        if warmup_peak > 1.0:
-            warmup_audio = warmup_audio / warmup_peak
-
-        if use_pipeline:
-            _processed, _, _ = _process_capture_block(warmup_audio)
+        if use_pipeline and array is not None:
+            time.sleep(warmup_seconds)
     except KeyboardInterrupt:
         print("Warm-up interrupted by user. Exiting.")
         return None
@@ -475,7 +475,7 @@ def test_di_signal(
     input("Warm-up complete. Press Enter to begin fixed-angle measurements...")
 
     print(f"Starting {num_passes}-pass fixed-angle measurements...")
-    print("For each angle: press Enter to record, Backspace to undo last measurement")
+    print("For each angle: press Enter to start a live measurement window, Backspace to undo the last result")
     print("Press Ctrl+C to stop early\n")
     
     try:
@@ -497,65 +497,9 @@ def test_di_signal(
                     input(f"  Pass {pass_num + 1}/{num_passes} at {angle_deg:.1f}°: press Enter to record...")
 
                     try:
-                        # Record in non-blocking mode with interrupt checks for better Ctrl+C responsiveness
-                        total_samples = int(sample_duration * sample_rate)
-                        chunk_size = int(sample_rate * 0.1)  # 100ms per chunk for interrupt checks
-                        audio_chunks = []
-                        
-                        print(f"    Recording (press Ctrl+C to stop)...", end="", flush=True)
-                        stream = sd.InputStream(
-                            samplerate=sample_rate,
-                            channels=num_channels,
-                            device=device_index,
-                            blocksize=chunk_size,
-                        )
-                        with stream:
-                            samples_recorded = 0
-                            while samples_recorded < total_samples:
-                                try:
-                                    chunk, _ = stream.read(chunk_size)
-                                    audio_chunks.append(chunk)
-                                    samples_recorded += len(chunk)
-                                    elapsed = samples_recorded / sample_rate
-                                    print(f"\r    Recording: {elapsed:.2f}s / {sample_duration:.2f}s", end="", flush=True)
-                                except KeyboardInterrupt:
-                                    print("\n    Recording interrupted by user")
-                                    interrupted = True
-                                    raise
-                        
-                        audio_data = np.vstack(audio_chunks) if audio_chunks else np.zeros((total_samples, num_channels), dtype=np.float32)
-                        print()  # newline
-                        
-                    except KeyboardInterrupt:
-                        print("\nMeasurement interrupted at recording stage")
-                        interrupted = True
-                        raise
-                    except Exception as e:
-                        logger.error(f"Error recording audio at angle {absolute_angle:.1f}°, pass {pass_num + 1}: {e}")
-                        continue
+                        if not use_pipeline or array is None:
+                            raise RuntimeError("Protocol 3 live side-door mode requires use_pipeline=True")
 
-                    audio_data = np.asarray(audio_data).astype(np.float32)
-                    max_val = np.max(np.abs(audio_data)) if audio_data.size > 0 else 0.0
-                    if max_val > 1.0:
-                        audio_data = audio_data / max_val
-
-                    raw_mono = audio_data[:, 0] if audio_data.ndim > 1 else audio_data
-                    input_rms_level = float(np.sqrt(np.mean(raw_mono ** 2)))
-                    input_rms_dbfs = _safe_dbfs(input_rms_level)
-
-                    # More angle-invariant input reference: average power across all mic channels.
-                    # This avoids the "gain" peaking just because mic channel 0 happens to be
-                    # in a null for a given rotation angle.
-                    if audio_data.ndim == 2 and audio_data.shape[1] > 0:
-                        input_power_avgch = float(np.mean(audio_data ** 2))
-                        input_rms_level_avgch = float(np.sqrt(max(input_power_avgch, 0.0)))
-                    else:
-                        input_rms_level_avgch = input_rms_level
-                    input_rms_dbfs_avgch = _safe_dbfs(input_rms_level_avgch)
-
-                    if use_pipeline:
-                        # Reset DOA state between captures so a large reposition does not require
-                        # many small hill-climb updates to reacquire.
                         if reset_doa_each_capture and doa_estimator is not None:
                             doa_estimator.latest_doa = None
                             if hasattr(doa_estimator, "_last_update_time"):
@@ -569,18 +513,40 @@ def test_di_signal(
                                 except Exception:
                                     pass
 
-                        processed_audio, doa_deg, doa_conf_db = _process_capture_block(audio_data)
-                    else:
-                        processed_audio = np.asarray(raw_mono, dtype=np.float32)
-                        doa_deg = None
-                        doa_conf_db = None
+                        if settle_seconds > 0:
+                            print(f"    Settling live stream for {settle_seconds:.1f}s...")
+                            time.sleep(settle_seconds)
 
-                    processed_audio = np.asarray(processed_audio, dtype=np.float32)
-                    rms_level = float(np.sqrt(np.mean(processed_audio ** 2)))
-                    peak_level = float(np.max(np.abs(processed_audio))) if processed_audio.size > 0 else 0.0
-                    rms_dbfs = _safe_dbfs(rms_level)
-                    peak_dbfs = _safe_dbfs(peak_level)
-                    # Diagnostic: output/input ratio (depends on input channel level).
+                        array.start_side_door_measurement()
+                        try:
+                            print(f"    Measuring live stream for {sample_duration:.1f}s...", end="", flush=True)
+                            measure_started = time.monotonic()
+                            while (time.monotonic() - measure_started) < sample_duration:
+                                time.sleep(0.05)
+                            snapshot = array.get_side_door_measurement_snapshot(reset=False)
+                        finally:
+                            array.stop_side_door_measurement()
+                        print()
+
+                        input_rms_level = float(snapshot["input_rms"])
+                        input_rms_dbfs = float(snapshot["input_rms_dbfs"])
+                        input_rms_level_avgch = float(snapshot["input_allch_rms"])
+                        input_rms_dbfs_avgch = float(snapshot["input_allch_rms_dbfs"])
+                        rms_level = float(snapshot["output_rms"])
+                        rms_dbfs = float(snapshot["output_rms_dbfs"])
+                        peak_level = float(snapshot["output_peak"])
+                        peak_dbfs = float(snapshot["output_peak_dbfs"])
+                        doa_deg = snapshot["doa_deg"]
+                        doa_conf_db = snapshot["doa_conf_db"]
+
+                    except KeyboardInterrupt:
+                        print("\nMeasurement interrupted by user")
+                        interrupted = True
+                        raise
+                    except Exception as e:
+                        logger.error(f"Error measuring angle {absolute_angle:.1f}°, pass {pass_num + 1}: {e}")
+                        continue
+
                     gain_inout_db = rms_dbfs - input_rms_dbfs
                     gain_inout_db_avgch = rms_dbfs - input_rms_dbfs_avgch
 
@@ -652,6 +618,9 @@ def test_di_signal(
         if len(all_measurements) == 0:
             print("No data to save.")
             return None
+
+    if array is not None and getattr(array, "is_running", False):
+        array.stop_realtime()
 
     if interrupted and not save_on_interrupt:
         print("Interrupted run detected. Partial data discarded (save_on_interrupt is OFF).")
@@ -768,6 +737,8 @@ if __name__ == '__main__':
                         help='Audio sample duration in seconds (default: 2.0). '
                              'Longer durations allow DOA estimator to converge to accurate steering. '
                              'Use 0.8 for quick tests (faster but less accurate DOA convergence).')
+    parser.add_argument('--settle-seconds', type=float, default=1.0,
+                        help='Live settle time before each measurement window in seconds (default: 1.0)')
     parser.add_argument('--output', type=str, default='data/test_protocol/3_free_beam_loss',
                         help='Output directory (default: data/test_protocol/3_free_beam_loss)')
     parser.add_argument('--reference-angle', type=int, default=0,
@@ -801,6 +772,7 @@ if __name__ == '__main__':
         angles=angle_list,
         device_index=args.device,
         sample_duration=args.duration,
+        settle_seconds=args.settle_seconds,
         output_dir=args.output,
         reference_angle=args.reference_angle,
         use_pipeline=not args.no_pipeline,
