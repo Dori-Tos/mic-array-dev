@@ -278,8 +278,11 @@ class Array_RealTime(Array):
             start_bf = time.monotonic()
             try:
                 if isinstance(doa_value, (int, float, np.integer, np.floating)):
-                    self.beamformer.set_steering_angle(float(doa_value))
-                    self.logger.debug(f"[Processing] Steering angle set to {doa_value:.1f}°")
+                    # Only update steering angle if it actually changed (avoid redundant updates)
+                    current_angle = self.beamformer.get_steering_angle() if hasattr(self.beamformer, "get_steering_angle") else None
+                    if current_angle is None or not np.isclose(float(doa_value), float(current_angle), atol=1e-4):
+                        self.beamformer.set_steering_angle(float(doa_value))
+                        self.logger.debug(f"[Processing] Steering angle set to {doa_value:.1f}°")
 
                 if callable(getattr(self.beamformer, "apply", None)):
                     self.logger.debug(f"[Processing] Starting beamformer apply")

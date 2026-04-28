@@ -115,7 +115,7 @@ class Array_RealTime(Array):
             logger: logging.Logger, 
             monitor_gain: float = 0.35, 
             output_mode: str = "local",
-            output_boundary_fade_ms: float = 0.0,
+            output_boundary_fade_ms: float = 8.0,
             downsample_rate: int | None = None, 
             initial_silence_duration: float = 2.0, **kwargs
         ):
@@ -150,6 +150,13 @@ class Array_RealTime(Array):
         self._warn_interval_s = 1.0
         self._post_agc_warn_threshold = 0.98
         self._final_warn_threshold = 0.98
+        self._debug_log_interval_s = 0.5
+        self._debug_state = {
+            "audio_queue_drop_last": 0.0,
+            "output_fifo_trim_last": 0.0,
+            "output_underflow_last": 0.0,
+            "fade_config_logged": False,
+        }
         self._output_fifo = deque()
         self._output_fifo_lock = threading.Lock()
         self._output_current_chunk = np.zeros(0, dtype=np.float32)
@@ -158,6 +165,9 @@ class Array_RealTime(Array):
         self._output_prev_sample = 0.0
         fade_ms = max(0.0, float(output_boundary_fade_ms))
         self._output_fade_samples = int(self._output_playback_rate * (fade_ms / 1000.0))
+
+        self._timing_summary_interval_s = 2.0
+        self._last_timing_summary_log = 0.0
 
         # Cache for downsampling internals so output-size probing is not repeated every block.
         self._downsample_cache_rate = None
@@ -307,6 +317,10 @@ class Array_RealTime(Array):
 
         self.logger.info("Starting realtime audio processing")
         self._last_input_blocksize = int(blocksize)
+        if self.doa_estimator is not None and hasattr(self.doa_estimator, "reset"):
+            self.doa_estimator.reset()
+        if self.beamformer is not None and hasattr(self.beamformer, "reset"):
+            self.beamformer.reset()
         self._processing_stop_event.clear()
         self._processing_thread = threading.Thread(target=self._process_audio_thread, daemon=True)
         self._processing_thread.start()
@@ -434,7 +448,10 @@ class Array_RealTime(Array):
         try:
             self._audio_queue.put_nowait(block)
         except queue.Full:
-            self.logger.debug("Queue full, dropping oldest block")
+            now = time.monotonic()
+            if (now - self._debug_state["audio_queue_drop_last"]) >= self._debug_log_interval_s:
+                self.logger.debug("[Audio Queue] Full in callback, dropping oldest capture block")
+                self._debug_state["audio_queue_drop_last"] = now
             try:
                 self._audio_queue.get_nowait()
                 self._audio_queue.put_nowait(block)
@@ -492,6 +509,25 @@ class Array_RealTime(Array):
         up = int(self._output_playback_rate // g)
         down = int(in_rate // g)
         return signal.resample_poly(mono, up, down).astype(np.float32, copy=False)
+
+    def _apply_chunk_boundary_fade(self, chunk: np.ndarray) -> np.ndarray:
+        """Apply a short fade-in and fade-out to a processed chunk before it is queued."""
+        chunk = np.asarray(chunk, dtype=np.float32).reshape(-1)
+        if chunk.size < 4 or self._output_fade_samples <= 0:
+            return chunk
+
+        fade_n = min(self._output_fade_samples, chunk.size // 2)
+        if fade_n <= 0:
+            return chunk
+
+        fade_window = np.hanning(fade_n * 2).astype(np.float32)
+        fade_in = fade_window[:fade_n]
+        fade_out = fade_window[fade_n:]
+
+        tapered = chunk.copy()
+        tapered[:fade_n] *= fade_in
+        tapered[-fade_n:] *= fade_out
+        return tapered
 
     def _send_codec_chunk(self, mono_out: np.ndarray, sample_rate: int):
         if not self._codec_stream_active:
@@ -593,11 +629,26 @@ class Array_RealTime(Array):
             mono_out = np.zeros(0, dtype=np.float32)
             start_bf = time.monotonic()
             try:
-                if self.beamformer is not None and isinstance(doa_value, (int, float, np.integer, np.floating)):
+                # Use smoothed DOA for beamformer steering to avoid sharp transitions
+                steering_angle = None
+                if self.doa_estimator is not None and hasattr(self.doa_estimator, "get_steering_angle"):
+                    steering_angle = self.doa_estimator.get_steering_angle()
+                
+                # Only update steering angle if it actually changed (avoid redundant updates)
+                if self.beamformer is not None and isinstance(steering_angle, (int, float, np.integer, np.floating)):
                     if hasattr(self.beamformer, "set_steering_angle"):
-                        self.beamformer.set_steering_angle(float(doa_value))
+                        current_angle = self.beamformer.get_steering_angle() if hasattr(self.beamformer, "get_steering_angle") else None
+                        if current_angle is None or not np.isclose(float(steering_angle), float(current_angle), atol=1e-4):
+                            self.beamformer.set_steering_angle(float(steering_angle))
 
-                apply_fn = getattr(self.beamformer, "apply", None)
+                # Try to use output-level crossfading method if available (MVDR), otherwise fall back to normal apply (DAS)
+                apply_fn = None
+                if hasattr(self.beamformer, "apply_with_overlap_add_crossfade"):
+                    # MVDRBeamformer now implements gentle output-level crossfading internally
+                    apply_fn = getattr(self.beamformer, "apply_with_overlap_add_crossfade")
+                else:
+                    apply_fn = getattr(self.beamformer, "apply", None)
+                
                 if callable(apply_fn):
                     beamformed = apply_fn(block)
                     if beamformed is not None:
@@ -687,9 +738,21 @@ class Array_RealTime(Array):
                     with self._output_fifo_lock:
                         self._output_fifo.append(mono_out)
                         self._output_buffered_samples += mono_out.size
+                        trimmed_chunks = 0
+                        trimmed_samples = 0
                         while self._output_buffered_samples > self._output_max_buffer_samples and len(self._output_fifo) > 0:
                             old = self._output_fifo.popleft()
                             self._output_buffered_samples -= old.size
+                            trimmed_chunks += 1
+                            trimmed_samples += int(old.size)
+                        if trimmed_chunks > 0:
+                            now_trim = time.monotonic()
+                            if (now_trim - self._debug_state["output_fifo_trim_last"]) >= self._debug_log_interval_s:
+                                self.logger.debug(
+                                    f"[Output FIFO] Trimmed {trimmed_chunks} chunk(s), {trimmed_samples} samples; "
+                                    f"buffer now {self._output_buffered_samples} samples"
+                                )
+                                self._debug_state["output_fifo_trim_last"] = now_trim
 
             if self.sampling_rate != original_rate:
                 self.sampling_rate = original_rate
@@ -706,7 +769,8 @@ class Array_RealTime(Array):
                 self._latest_doa = doa_value
                 self._latest_beamformed = beamformed_value
 
-            if block_count % 10 == 0:
+            now_summary = time.monotonic()
+            if (now_summary - self._last_timing_summary_log) >= self._timing_summary_interval_s:
                 # Calculate average delays from accumulated timings
                 avg_delays = {
                     'doa_ms': np.mean(timing_accumulators['doa_ms']) if timing_accumulators['doa_ms'] else 0.0,
@@ -735,6 +799,7 @@ class Array_RealTime(Array):
                     f"Overall: {block_count} blocks in {elapsed_total:.1f}s ({blocks_per_sec:.1f} blocks/sec)"
                 )
                 
+                self._last_timing_summary_log = now_summary
                 # Clear accumulators for next window
                 timing_accumulators = {
                     'doa_ms': [],
@@ -814,6 +879,12 @@ class Array_RealTime(Array):
             self._output_current_chunk = np.zeros(0, dtype=np.float32)
             self._output_buffered_samples = 0
         self._output_prev_sample = 0.0
+        if not self._debug_state["fade_config_logged"]:
+            self.logger.debug(
+                f"[Output] Boundary fade configured: {self._output_fade_samples} samples "
+                f"({(1000.0 * self._output_fade_samples / max(self._output_playback_rate, 1)):.2f} ms)"
+            )
+            self._debug_state["fade_config_logged"] = True
 
         stream_kwargs = {
             "samplerate": output_sample_rate,
@@ -928,6 +999,10 @@ class Array_RealTime(Array):
                         self._output_current_chunk = self._output_fifo.popleft()
                         self._output_buffered_samples -= self._output_current_chunk.size
                     else:
+                        now_underflow = time.monotonic()
+                        if (now_underflow - self._debug_state["output_underflow_last"]) >= self._debug_log_interval_s:
+                            self.logger.debug("[Output FIFO] Underflow: no processed audio available, outputting silence")
+                            self._debug_state["output_underflow_last"] = now_underflow
                         break
 
             remaining = frames - write_idx
@@ -955,17 +1030,4 @@ class Array_RealTime(Array):
                 self.logger.info("[Output] Filters are setup")
                 self._adapt_log_state["setup_logged"] = True
 
-        # Optional boundary fade (disabled by default) to smooth hard chunk joins.
-        # Keeping this off avoids introducing periodic artifacts at block boundaries.
-        if chunk.size > 0:
-            fade_n = min(self._output_fade_samples, chunk.size)
-            if fade_n > 0:
-                hann_window = np.hanning(fade_n * 2)[:fade_n].astype(np.float32)
-                hann_fade = 1.0 - hann_window
-                start = float(self._output_prev_sample)
-                end = float(chunk[0])
-                linear = np.linspace(start, end, num=fade_n, endpoint=False, dtype=np.float32)
-                chunk[:fade_n] = linear * hann_fade + chunk[:fade_n] * (1.0 - hann_fade)
-            self._output_prev_sample = float(chunk[-1])
-        
         outdata[:, 0] = np.clip(chunk, -1.0, 1.0)

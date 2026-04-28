@@ -40,7 +40,7 @@ if __name__ == "__main__":
         logger=logger,
         update_rate=1.0,
         angle_range=(-25, 25),
-        beamformer=beamformer,
+        doa_beamformer=beamformer,
         scan_step_deg=5.0,
     )
     echo_canceller = EchoCanceller(logger=logger, sample_rate=sample_rate, channels=4)

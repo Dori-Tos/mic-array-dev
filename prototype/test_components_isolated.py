@@ -151,7 +151,7 @@ def _build_mode_components(mode: int, logger: logging.Logger, script_dir: Path, 
             logger=logger,
             update_rate=3.0,
             angle_range=(-25, 25),
-            beamformer=das_beamformer,
+            doa_beamformer=das_beamformer,
             scan_step_deg=5.0,
         )
         doa_estimator.freeze(0.0)

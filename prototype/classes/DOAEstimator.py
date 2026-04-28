@@ -63,13 +63,17 @@ class IterativeDOAEstimator(DOAEstimator):
     :param logger: logging.Logger instance for logging messages.
     :param update_rate: Maximum rate (in Hz) at which the DOA estimate is updated (default: 3.0).
     :param angle_range: Tuple specifying the minimum and maximum angles (in degrees) to consider for DOA estimation (default: (-25, 25)).
-    :param beamformer: Beamformer instance to use for computing the beamformed output at different angles. This allows the DOA estimator to be flexible and work with any beamforming algorithm (e.g., DAS, MVDR).
+    :param doa_beamformer: Beamformer instance to use for computing the beamformed output at different angles. It is different from the main beamformer used for processing, allowing for faster DOA scanning (e.g., using a simple DAS beamformer).
+    :param beamformer: Main beamformer instance used for processing. This is needed to reset its weight history when the DOA changes significantly, preventing lag-induced artifacts.
     :param scan_step_deg: Step size in degrees for scanning neighboring angles during the local search
         (default: 1.0). Smaller steps may yield more accurate DOA estimates but increase computational load.
     :param normalize_channels: If True, normalize each channel's RMS before DOA estimation to reduce bias from mic gain mismatch (default: True).
     :param bootstrap_full_scan: If True, perform a full scan of the angle range on the first update to initialize the DOA estimate (default: True). This ensures the algorithm starts at the global best angle instead of 0°.
     :param periodic_full_scan_blocks: Number of update iterations between full rescans (default: 60). Set to 0 to disable periodic scans. Periodic full scans help escape local maxima and explore the full angle range.
-    :param local_search_radius_deg: Radius in degrees around current DOA to search during local hill-climbing (default: 5.0). Larger values cover more range per iteration (e.g., 5.0 checks from -5° to +5°). This allows escaping plateaus faster but costs more computation.
+    :param local_search_radius_deg: Radius in degrees around current DOA to search during local hill-climbing (default: 3.0). Smaller values (3-5°) help avoid wild jumps; larger values cover more range per iteration.
+    :param min_update_rms: Minimum RMS energy required in the audio block to perform a DOA update (default: 0.0005). This prevents updates during silence or very low energy, which can cause noisy DOA estimates.
+    :param min_confidence_db: Minimum confidence in dB required to accept a new DOA estimate (default: 1.5). Confidence is computed as the gain difference between the best and second-best angles. This prevents updates when the DOA estimate is ambiguous, reducing jitter.
+    :param min_gain_improvement_db: Minimum improvement in dB required to accept a new angle during local search (default: 0.5 dB). Prevents oscillation between equally-good neighbors; requires meaningful gain change to prevent thrashing.
     """
     
     def __init__(
@@ -77,36 +81,76 @@ class IterativeDOAEstimator(DOAEstimator):
         logger: logging.Logger,
         update_rate: float = 3.0,
         angle_range: tuple = (-25, 25),
+        doa_beamformer: Beamformer | None = None,
         beamformer: Beamformer | None = None,
         scan_step_deg: float = 1.0,
+        smooth_step_deg: float = 1.5,
         normalize_channels: bool = True,
         bootstrap_full_scan: bool = True,
         periodic_full_scan_blocks: int = 60,
-        local_search_radius_deg: float = 5.0,
+        local_search_radius_deg: float = 3.0,
+        min_update_rms: float = 0.0005,
+        min_confidence_db: float = 1.5,
+        min_gain_improvement_db: float = 0.5,
     ):
         super().__init__(logger=logger, update_rate=update_rate, angle_range=angle_range)
 
-        if beamformer is None:
+        if doa_beamformer is None:
             raise ValueError("IterativeDOAEstimator requires a Beamformer instance")
+        if beamformer is None:
+            raise ValueError("IterativeDOAEstimator requires a main Beamformer instance")
         if scan_step_deg <= 0:
             raise ValueError("scan_step_deg must be > 0")
         if local_search_radius_deg <= 0:
             raise ValueError("local_search_radius_deg must be > 0")
+        if min_update_rms <= 0:
+            raise ValueError("min_update_rms must be > 0")
+        if min_confidence_db < 0:
+            raise ValueError("min_confidence_db must be >= 0")
 
+        self.doa_beamformer = doa_beamformer
         self.beamformer = beamformer
         self.scan_step_deg = float(scan_step_deg)
+        self.smooth_step_deg = float(smooth_step_deg)
         self.normalize_channels = bool(normalize_channels)
         self.bootstrap_full_scan = bool(bootstrap_full_scan)
         self.periodic_full_scan_blocks = int(periodic_full_scan_blocks)
         self.local_search_radius_deg = float(local_search_radius_deg)
+        self.min_update_rms = float(min_update_rms)
+        self.min_confidence_db = float(min_confidence_db)
+        self.min_gain_improvement_db = float(min_gain_improvement_db)
         self._last_update_time = 0.0
         self._latest_gain = None
         self.latest_confidence_db: float | None = None
         self._update_count = 0  # Track updates for periodic full scan
         self.last_process_time_ms: float = 0.0  # Actual computation time in ms (not including early returns)
+        # Low-energy threshold for skipping DOA updates to avoid noise during pauses
+        self._consecutive_low_energy_frames = 0  # Track how many consecutive low-energy frames
+        # DOA smoothing: smooth DOA transitions to prevent sharp steering vector changes
+        # Target-based interpolation: move towards new DOA by at most 1° per block
+        self._smoothed_doa = None  # Current smoothed DOA sent to beamformer (updates every block)
+        self._target_doa = None    # Target DOA from latest estimation
+        self._doa_step_per_block = 1.0  # Max 1° per block to reach new estimates smoothly
+        # Logging rate-limiting to avoid log flooding from per-block stepping
+        self._last_stepping_log_time = 0.0
+        self._stepping_log_interval = 0.25  # seconds between stepping logs
+        # Adaptive stepping: scale per-block step based on confidence (0.5x to 2.0x)
+        self._last_confidence_db = None  # Track confidence for adaptive stepping logic
+
+    def reset(self):
+        self._last_update_time = 0.0
+        self._latest_gain = None
+        self.latest_doa = None
+        self.latest_confidence_db = None
+        self._update_count = 0
+        self.last_process_time_ms = 0.0
+        self._consecutive_low_energy_frames = 0
+        self._smoothed_doa = None
+        self._target_doa = None
+        self._last_confidence_db = None
 
     def _compute_gain(self, block: np.ndarray, angle_deg: float) -> float:
-        beamformed = self.beamformer.apply(block, theta_deg=float(angle_deg))
+        beamformed = self.doa_beamformer.apply(block, theta_deg=float(angle_deg))
         beamformed_arr = np.asarray(beamformed, dtype=np.float64)
         return float(np.mean(beamformed_arr * beamformed_arr))
 
@@ -125,7 +169,7 @@ class IterativeDOAEstimator(DOAEstimator):
         :return: Array of gains corresponding to each angle
         """
         # Prepare block
-        selected = self.beamformer._select_channels(np.asarray(block, dtype=np.float64))
+        selected = self.doa_beamformer._select_channels(np.asarray(block, dtype=np.float64))
         n_samples = selected.shape[0]
         
         if n_samples == 0 or len(angles_deg) == 0:
@@ -141,10 +185,10 @@ class IterativeDOAEstimator(DOAEstimator):
         for angle_idx, angle_deg in enumerate(angles_deg):
             theta_rad = np.deg2rad(angle_deg)
             # Reuse beamformer's steering matrix computation
-            steering = self.beamformer._steering_matrix(theta_rad=theta_rad, n_fft=n_samples)  # (freq_bins, channels)
+            steering = self.doa_beamformer._steering_matrix(theta_rad=theta_rad, n_fft=n_samples)  # (freq_bins, channels)
             
             # Apply steering (complex conjugate) and sum across channels: shape (freq_bins,)
-            weights = np.conj(steering) / self.beamformer.channel_count
+            weights = np.conj(steering) / self.doa_beamformer.channel_count
             output_spectrum = np.sum(spectrum * weights, axis=1)  # (freq_bins,)
             
             # Compute gain directly from frequency domain (no IFFT needed!)
@@ -203,6 +247,136 @@ class IterativeDOAEstimator(DOAEstimator):
         rms = np.sqrt(np.mean(arr * arr, axis=0) + eps)
         return arr / rms[None, :]
 
+    def _compute_confidence_db(self, gains: np.ndarray) -> float | None:
+        finite_gains = np.asarray(gains, dtype=np.float64)
+        finite_gains = finite_gains[np.isfinite(finite_gains)]
+        if finite_gains.size < 2:
+            return None
+
+        sorted_gains = np.sort(finite_gains)[::-1]
+        best = float(sorted_gains[0])
+        second = float(sorted_gains[1])
+        if second <= 0.0:
+            return None
+        eps = 1e-20
+        return float(10.0 * np.log10((best + eps) / (second + eps)))
+    
+    def _get_adaptive_step_rate(self) -> float:
+        """
+        Scale the per-block stepping rate based on confidence.
+        
+        - Low confidence (< 1 dB): 0.75x (slower, more cautious)
+        - Medium confidence (1-3 dB): 1.0x (normal)
+        - High confidence (> 3 dB): 1.5x (faster tracking)
+        
+        This allows quick responses when DOA is clear, but slower when ambiguous.
+        """
+        if self._last_confidence_db is None:
+            return 1.0  # Normal rate
+        
+        conf = self._last_confidence_db
+        if conf < 1.0:
+            return 0.75  # Low confidence: step slower
+        elif conf > 3.0:
+            return 1.5   # High confidence: step faster
+        else:
+            # Linear interpolation between 0.75 and 1.5 for confidence 1-3 dB
+            return 0.75 + (conf - 1.0) * (1.5 - 0.75) / 2.0
+    
+    
+    def _reset_beamformer_on_doa_change(self, new_doa: float):
+        """
+        Disabled: Aggressive resets on DOA changes cause artifacts through discontinuities.
+        
+        Let the beamformer handle DOA tracking changes through natural alpha smoothing
+        of weights and covariance. The smoothing already adapts gradually to steering changes.
+        """
+        pass
+
+    def _update_smoothed_doa(self):
+        """
+        Update target DOA from latest estimation.
+        
+        Calls _step_smoothed_doa() to gradually approach this target by at most 1° per block.
+        This decouples DOA estimation (3 Hz) from steering angle updates (50 Hz per block),
+        ensuring smooth beamformer transitions.
+        """
+        if self.latest_doa is None:
+            return
+        
+        # Initialize or update target
+        old_target = self._target_doa
+        self._target_doa = float(self.latest_doa)
+        
+        # First estimate: initialize smoothed to target
+        if self._smoothed_doa is None:
+            self._smoothed_doa = self._target_doa
+            self.logger.debug(f"[DOA] Smoothing initialized at {self._smoothed_doa:.1f}°")
+            return
+        
+        # Log new target if it changed significantly
+        if old_target is not None and abs(self._target_doa - old_target) >= 1.0:
+            self.logger.debug(f"[DOA] New target: {self._target_doa:.1f}° (was {old_target:.1f}°)")
+    
+    def _step_smoothed_doa(self):
+        """
+        Advance smoothed DOA towards target by 0.5–2.25° per block (adaptive stepping).
+        Called once per block (every ~20ms) regardless of DOA estimation frequency.
+        
+        Stepping rate adapts based on confidence:
+        - Low confidence: slower (0.5°/block)
+        - Medium confidence: normal (1.5°/block)  
+        - High confidence: faster (2.25°/block)
+        
+        This interpolates from current smoothed angle towards the target,
+        ensuring beamformer steering changes gradually but responsively.
+        """
+        if self._smoothed_doa is None or self._target_doa is None:
+            return
+        
+        # Calculate distance to target
+        distance = self._target_doa - self._smoothed_doa
+        
+        # Compute adaptive step based on confidence
+        adaptive_multiplier = self._get_adaptive_step_rate()
+        adaptive_step = self.smooth_step_deg * adaptive_multiplier
+        
+        # Move at most adaptive_step towards target
+        now = time.monotonic()
+        if abs(distance) > adaptive_step:
+            # Not at target yet: step towards it
+            step_sign = 1.0 if distance > 0 else -1.0
+            self._smoothed_doa += step_sign * adaptive_step
+            # Throttle stepping logs to avoid flooding
+            if now - self._last_stepping_log_time >= self._stepping_log_interval:
+                conf_str = f"{self._last_confidence_db:.1f}" if self._last_confidence_db is not None else "??"
+                self.logger.debug(
+                    f"[DOA] → Stepping: {self._smoothed_doa:.1f}° (target {self._target_doa:.1f}°, "
+                    f"dist {distance:.1f}°, conf={conf_str}dB, rate={adaptive_multiplier:.2f}x)"
+                )
+                self._last_stepping_log_time = now
+        else:
+            # Close enough: snap to target
+            if abs(self._smoothed_doa - self._target_doa) > 1e-9:
+                self._smoothed_doa = self._target_doa
+                # Log reached-target at most once per interval
+                if now - self._last_stepping_log_time >= self._stepping_log_interval:
+                    self.logger.debug(f"[DOA] ✓ Reached target: {self._smoothed_doa:.1f}°")
+                    self._last_stepping_log_time = now
+    
+    def get_steering_angle(self) -> float | None:
+        """
+        Get the angle to use for beamformer steering.
+        
+        Returns the smoothed DOA to allow gradual transitions instead of sharp jumps.
+        This prevents beamformer weight mismatches that cause audio artifacts.
+        
+        If smoothed DOA is not initialized, returns latest raw estimate.
+        """
+        if self._smoothed_doa is not None:
+            return float(self._smoothed_doa)
+        return self.latest_doa
+
     def estimate_doa(self, audio_block):
         """
         Smooth DOA tracking using local bidirectional hill-climbing.
@@ -227,11 +401,34 @@ class IterativeDOAEstimator(DOAEstimator):
         if block.ndim != 2 or block.shape[0] == 0:
             return self.latest_doa
 
+        # Step smoothed DOA towards target on EVERY block (before rate-limiting check)
+        # This ensures smooth steering changes at ~50 Hz regardless of DOA update rate (3 Hz)
+        self._step_smoothed_doa()
+
         now = time.monotonic()
         min_interval = 1.0 / self.update_rate
         if (now - self._last_update_time) < min_interval:
+            steering_angle = self.get_steering_angle()
+            if steering_angle is not None:
+                # Throttle this per-block informational log to avoid spamming
+                now_log = time.monotonic()
+                if now_log - self._last_stepping_log_time >= self._stepping_log_interval:
+                    self.logger.debug(f"[DOA] → Stepping towards target: {steering_angle:.1f}°")
+                    self._last_stepping_log_time = now_log
             return self.latest_doa
 
+        block_float = np.asarray(block, dtype=np.float64)
+        block_rms = float(np.sqrt(np.mean(block_float * block_float) + 1e-12))
+        if block_rms < self.min_update_rms:
+            doa_time_ms = (time.perf_counter() - doa_start) * 1000.0
+            self.last_process_time_ms = doa_time_ms
+            self._consecutive_low_energy_frames += 1
+            # During low energy (pauses), skip DOA update but keep last DOA value via rate limiting
+            return self.latest_doa
+        
+        # Energy is above threshold - reset low-energy counter
+        self._consecutive_low_energy_frames = 0
+        
         block_for_doa = self._normalize_block_channels(block) if self.normalize_channels else np.asarray(block, dtype=np.float64)
 
         # Periodic full scan to escape local maxima
@@ -246,9 +443,16 @@ class IterativeDOAEstimator(DOAEstimator):
             if self.bootstrap_full_scan:
                 init_result = self._initial_full_scan(block_for_doa)
                 if init_result is not None:
-                    self.latest_doa, self._latest_gain = init_result
+                    init_angle, init_gain = init_result
+                    # Initialize to best angle found
+                    self.latest_doa = init_angle
+                    self._latest_gain = init_gain
                     self._last_update_time = now
                     self._update_count += 1
+                    self._update_smoothed_doa()  # Set target, stepping will begin next block
+                    self.logger.debug(
+                        f"[DOA] ✓ Bootstrap: {init_angle:.1f}° (rms={block_rms:.5f})"
+                    )
                 return self.latest_doa
 
             # Default: initialize at 0° (or nearest bound) and use local search immediately.
@@ -260,16 +464,22 @@ class IterativeDOAEstimator(DOAEstimator):
 
         # Do periodic full scan or local search
         if should_do_periodic_full_scan:
-            self.logger.debug(f"[DOA] Performing full scan at update #{self._update_count}")
+            self.logger.debug(f"[DOA] Performing periodic full scan at update #{self._update_count}")
             scan_result = self._initial_full_scan(block_for_doa)
             if scan_result is not None:
-                self.latest_doa, self._latest_gain = scan_result
-                self.logger.debug(f"[DOA] Full scan result: {self.latest_doa:.1f}°")
+                scan_angle, scan_gain = scan_result
+                # Direct update with target-based smoothing
+                self.latest_doa = scan_angle
+                self._latest_gain = scan_gain
+                self._update_smoothed_doa()  # Set target, stepping will reach it gradually
+                doa_str = f"{self.latest_doa:.1f}" if self.latest_doa is not None else "???"
+                self.logger.debug(f"[DOA] ↻ Periodic rescan: {doa_str}°")
             self._last_update_time = now
             self._update_count += 1
             doa_time_ms = (time.perf_counter() - doa_start) * 1000.0
             self.last_process_time_ms = doa_time_ms  # Track actual computation time
-            self.logger.debug(f"[DOA] Estimated: {self.latest_doa:.1f}° (took {doa_time_ms:.2f}ms)")
+            doa_str = f"{self.latest_doa:.1f}" if self.latest_doa is not None else "???"
+            self.logger.debug(f"[DOA] Estimated: {doa_str}° (took {doa_time_ms:.2f}ms)")
             return self.latest_doa
 
         # Local hill-climbing search
@@ -302,18 +512,36 @@ class IterativeDOAEstimator(DOAEstimator):
             best_idx = int(np.argmax(gains))
             best_angle = candidate_angles[best_idx]
             best_gain = gains[best_idx]
+            local_confidence_db = self._compute_confidence_db(gains)
+            self.latest_confidence_db = local_confidence_db
+            self._last_confidence_db = local_confidence_db  # Store for adaptive stepping
 
             for idx, gain in enumerate(gains):
                 self.logger.debug(f"Angle {candidate_angles_arr[idx]:6.1f}° -> gain {gain:.6e}")
 
-            # Simple logic: move to best angle found
-            if best_gain > current_gain:
+            # HYSTERESIS: Move to best angle only if gain improves significantly (min_gain_improvement_db)
+            # This prevents oscillation between equally-good neighbors
+            if current_gain > 0.0:
+                gain_improvement_db = 10.0 * np.log10((best_gain + 1e-10) / (current_gain + 1e-10))
+            else:
+                gain_improvement_db = 0.0 if best_gain <= current_gain else float('inf')
+            
+            if best_gain > current_gain and gain_improvement_db >= self.min_gain_improvement_db:
                 self.latest_doa = float(best_angle)
                 self._latest_gain = float(best_gain)
-                gain_diff_db = 10.0 * np.log10((best_gain + 1e-10) / (current_gain + 1e-10)) if current_gain > 0 else 0
-                self.logger.debug(f"[DOA] Moving to {best_angle:.1f}° (gain diff: {gain_diff_db:.2f}dB)")
+                self._update_smoothed_doa()  # Apply DOA smoothing
+                conf_str = f"{local_confidence_db:.2f}" if local_confidence_db is not None else "??"
+                self.logger.debug(
+                    f"[DOA] ↗ Moved to {best_angle:.1f}° (+{gain_improvement_db:.2f}dB, conf={conf_str}dB)"
+                )
             else:
                 self._latest_gain = float(current_gain)
+                # Log when hysteresis prevents a move (for debugging)
+                if best_gain > current_gain and gain_improvement_db < self.min_gain_improvement_db:
+                    self.logger.debug(
+                        f"[DOA] ⊗ Hysteresis: didn't move to {best_angle:.1f}° "
+                        f"({gain_improvement_db:.2f}dB < {self.min_gain_improvement_db:.2f}dB threshold)"
+                    )
 
             self._last_update_time = now
             self._update_count += 1
@@ -321,7 +549,8 @@ class IterativeDOAEstimator(DOAEstimator):
         # Log timing information
         doa_time_ms = (time.perf_counter() - doa_start) * 1000.0
         self.last_process_time_ms = doa_time_ms  # Track actual computation time
-        self.logger.debug(f"[DOA] Estimated: {self.latest_doa:.1f}° (took {doa_time_ms:.2f}ms)")
+        doa_str = f"{self.latest_doa:.1f}" if self.latest_doa is not None else "???"
+        self.logger.debug(f"[DOA] Estimated: {doa_str}° (took {doa_time_ms:.2f}ms)")
         
         return self.latest_doa
         

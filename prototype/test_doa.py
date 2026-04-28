@@ -60,7 +60,7 @@ if __name__ == "__main__":
         logger=logger,
         update_rate=3.0,
         angle_range=(-25, 25),
-        beamformer=das_beamformer,  # Use DAS for fast DOA scanning
+        doa_beamformer=das_beamformer,  # Use DAS for fast DOA scanning
         scan_step_deg=5.0,
     )
     echo_canceller = EchoCanceller(logger=logger, sample_rate=sample_rate, channels=4)

@@ -83,7 +83,22 @@ class Beamformer:
         return np.asarray(positions, dtype=np.float64)
 
     def set_steering_angle(self, theta_deg: float):
-        self._steering_angle_deg = float(theta_deg)
+        # Avoid redundant updates for near-equal angles to prevent unnecessary resets
+        try:
+            current = float(self._steering_angle_deg)
+        except Exception:
+            current = None
+
+        new_angle = float(theta_deg)
+        if current is not None and np.isclose(current, new_angle, atol=1e-3):
+            return
+
+        self._steering_angle_deg = new_angle
+        # Log actual steering updates for easier debugging (rate-limited by callers)
+        try:
+            self.logger.debug(f"[Beamformer] Steering angle set to {self._steering_angle_deg:.2f}°")
+        except Exception:
+            pass
 
     def get_steering_angle(self) -> float:
         return self._steering_angle_deg
@@ -131,7 +146,27 @@ class Beamformer:
     
     def apply(self, block: np.ndarray, theta_deg: float | None = None) -> np.ndarray:
         raise NotImplementedError()
-
+    
+    def reset_weight_history(self):
+        """
+        Reset the weight smoothing history (if applicable for this beamformer).
+        
+        Used by DOAEstimator when DOA changes significantly (≥1°) to prevent
+        lag-induced artifacts from steering/covariance/weight mismatch.
+        
+        Base implementation: no-op. Subclasses with weight smoothing override this.
+        """
+        pass    
+    def reset_on_doa_change(self):
+        """
+        Reset both weight and covariance history for complete DOA change adaptation.
+        
+        Used by MVDRBeamformer to handle DOA changes by resetting both smoothing buffers.
+        This prevents lag-induced artifacts from steering/covariance/weight mismatches.
+        
+        Base implementation: no-op. Only MVDR uses this.
+        """
+        pass
 
 class DASBeamformer(Beamformer):
     """
@@ -188,6 +223,13 @@ class DASBeamformer(Beamformer):
         self.last_process_time_ms = beam_time_ms
         result_arr = np.asarray(result)
         return result
+    
+    def apply_with_overlap_add_crossfade(self, block: np.ndarray, theta_deg: float | None = None) -> np.ndarray:
+        """
+        For DAS (stateless), this is identical to apply() since there is no internal filter state.
+        DAS beamforming doesn't have covariance/weight smoothing, so steering changes don't cause discontinuities.
+        """
+        return self.apply(block, theta_deg)
 
 
 class MVDRBeamformer(Beamformer):
@@ -295,14 +337,59 @@ class MVDRBeamformer(Beamformer):
         self._prev_weights: np.ndarray | None = None
         self._power_iteration_vec: np.ndarray | None = None
         self._last_coherence: np.ndarray | None = None  # Store last computed coherence for external use (e.g., AGC)
+        self._prev_steering_angle_deg: float | None = None  # Track steering angle for auto-reset on DOA changes
         self._identity = np.eye(self.channel_count, dtype=np.complex128)
         self._eps = 1e-12
+        
+        # Output-level crossfading for steering angle transitions (blend block outputs, not beamformer states)
+        self._prev_output: np.ndarray | None = None  # Previous block's beamformed output for blending
+        self._prev_steering_angle_for_blend: float | None = None  # Steering angle of previous block
 
     def reset(self):
         self._covariance = None
         self._prev_weights = None
         self._power_iteration_vec = None
         self._last_coherence = None
+        self._prev_steering_angle_deg = None
+        self._prev_output = None
+        self._prev_steering_angle_for_blend = None
+    
+    # def reset_weight_history(self):
+    #     """
+    #     Reset the weight smoothing history to allow fresh weight computation.
+        
+    #     Used when DOA changes significantly (≥1°) to prevent lag-induced artifacts.
+    #     Setting _prev_weights = None breaks the smoothing chain for exactly 1 block,
+    #     allowing MVDR weights to recompute freely for the new steering direction
+    #     without being constrained by old weights from a different DOA.
+        
+    #     This fixes the fundamental problem: MVDR is nonlinear in steering vector,
+    #     and when DOA changes but old weights are applied to new steering matrix,
+    #     the solution becomes mismatched → phase/amplitude discontinuities → artifacts.
+    #     """
+    #     self._prev_weights = None
+    
+    # def reset_on_doa_change(self):
+    #     """
+    #     Complete reset of weight and covariance history on significant DOA changes.
+        
+    #     Resets BOTH _prev_weights and _covariance to enable instant adaptation to new
+    #     steering direction without lag-mismatch artifacts. This is stricter than 
+    #     reset_weight_history() and should only be used when DOA changes significantly (≥1°).
+        
+    #     Rationale:
+    #     - MVDR weights are nonlinear in both steering vector AND covariance matrix
+    #     - Weight smoothing alpha=0.72-0.82 adapts in 2-3 blocks (worst: 0.6s @ 5Hz)
+    #     - Covariance smoothing alpha=0.9 adapts in 10 blocks (worst: 2s @ 5Hz)
+    #     - When DOA changes, both must adapt, not just weights
+    #     - Resetting both allows instant recalculation in Block N+1
+    #     - Covariance still smooths gradually from fresh spectrum (acceptable)
+        
+    #     Without this, new steering applied to old covariance creates discontinuities
+    #     → output amplitude/phase swings at block boundaries → pops in audio
+    #     """
+    #     self._prev_weights = None
+    #     self._covariance = None
     
     def get_last_coherence(self) -> np.ndarray | None:
         """
@@ -508,6 +595,18 @@ class MVDRBeamformer(Beamformer):
         if n_samples == 0:
             return np.array([], dtype=np.float64)
 
+        # # Auto-detect DOA changes and reset weight AND covariance history to prevent lag-induced artifacts.
+        # # When steering angle changes significantly (≥1°), reset both _prev_weights and _covariance
+        # # to allow instant adaptation to new steering direction without lag mismatch.
+        # if self._prev_steering_angle_deg is not None:
+        #     doa_delta = abs(theta_deg - self._prev_steering_angle_deg)
+        #     # Require strictly greater than 1.0° to avoid resets on exact 1.0° step transitions
+        #     if doa_delta > 1.0:
+        #         self.reset_on_doa_change()
+        #         self.logger.debug(f"[MVDR] Auto-reset weights + covariance on DOA change: {self._prev_steering_angle_deg:.1f}° → {theta_deg:.1f}° (delta: {doa_delta:.2f}°)")
+        # Store prev angle at reduced precision to avoid floating-point noise in comparisons
+        self._prev_steering_angle_deg = float(round(theta_deg, 3))
+
         theta_rad = np.deg2rad(theta_deg)
         steering = self._steering_matrix(theta_rad=theta_rad, n_fft=n_samples)
         spectrum = np.fft.rfft(selected, axis=0).astype(np.complex128, copy=False)
@@ -596,7 +695,29 @@ class MVDRBeamformer(Beamformer):
         beam_start = time.perf_counter()
         angle = self.get_steering_angle() if theta_deg is None else float(theta_deg)
         result = self.process(block, angle)
+
+        # Output-level boundary taper: apply a short fade near the block edges
+        # without feeding previous output back into the next block.
+        result_arr = np.asarray(result, dtype=np.float64)
+
+        n_fade_samples = min(len(result_arr) // 8, 64)
+        if n_fade_samples > 2:
+            fade_in = np.linspace(0.0, 1.0, n_fade_samples, dtype=np.float64)
+            fade_out = fade_in[::-1]
+
+            output_arr = result_arr.copy()
+            output_arr[:n_fade_samples] *= fade_in
+            output_arr[-n_fade_samples:] *= fade_out
+        else:
+            output_arr = result_arr
+
         beam_time_ms = (time.perf_counter() - beam_start) * 1000.0
-        result_arr = np.asarray(result)
         self.last_process_time_ms = beam_time_ms
-        return result
+        return output_arr
+    
+    def apply_with_overlap_add_crossfade(self, block: np.ndarray, theta_deg: float | None = None) -> np.ndarray:
+        """
+        Alias for apply() - output-level crossfading is handled internally in apply().
+        Kept for backwards compatibility with Array_RealTime.
+        """
+        return self.apply(block, theta_deg)

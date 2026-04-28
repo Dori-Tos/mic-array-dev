@@ -46,21 +46,21 @@ if __name__ == "__main__":
             logger.error(f"Invalid channel: {sys.argv[1]}")
             sys.exit(1)
     else:
-        channels_to_test = [0, 1, 2, 3]  # Test all 4 mics in sequence
+        channels_to_test = [0, 1, 2, 3, 4, 5, 6, 7]  # Test all 8 mics in sequence
     
-    mic_channel_numbers = [0, 1, 2, 3]
+    mic_channel_numbers = [0, 1, 2, 3, 4, 5, 6, 7]
     mic_list = [Microphone(logger=logger, channel_number=i, sampling_rate=sample_rate) for i in mic_channel_numbers]
     
     try:
-        # Start audio capture (4-channel)
+        # Start audio capture (8-channel)
         stream = sd.InputStream(
-            channels=4,
+            channels=8,
             samplerate=sample_rate,
             blocksize=blocksize,
             dtype=np.float32
         )
         stream.start()
-        logger.info(f"Audio stream started: {sample_rate}Hz, 4 channels")
+        logger.info(f"Audio stream started: {sample_rate}Hz, 8 channels")
         
         # Create output stream (mono playback)
         output_stream = sd.OutputStream(

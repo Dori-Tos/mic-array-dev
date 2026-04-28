@@ -94,7 +94,7 @@ def _build_mode_components(
     codec,
 ):
     use_single_mic = mode == MODE_SINGLE
-    mic_channel_numbers = [0] if use_single_mic else [0, 1, 2, 3]
+    mic_channel_numbers = [0] if use_single_mic else [0, 1, 2, 3, 4, 5, 6, 7]
     mic_list = [Microphone(logger=logger, channel_number=i, sampling_rate=sample_rate) for i in mic_channel_numbers]
 
     if use_single_mic:
@@ -138,9 +138,11 @@ def _build_mode_components(
         logger=doa_logger,
         update_rate=3.0,
         angle_range=(-25, 25),
-        beamformer=das_beamformer,
-        scan_step_deg=5.0,
-        local_search_radius_deg=10.0,
+        doa_beamformer=das_beamformer,
+        beamformer=mvdr_beamformer,
+        scan_step_deg=3.0,
+        smooth_step_deg=1.0,
+        local_search_radius_deg=9.0,
         periodic_full_scan_blocks=20,
     )
     # doa_estimator.freeze(0.0)
@@ -149,7 +151,7 @@ def _build_mode_components(
         "mic_list": mic_list,
         "doa_estimator": doa_estimator,
         "beamformer": mvdr_beamformer,
-        "echo_canceller": EchoCanceller(logger=echo_canceller_logger, sample_rate=sample_rate, channels=4),
+        "echo_canceller": EchoCanceller(logger=echo_canceller_logger, sample_rate=sample_rate, channels=8),
         "filters": filters,
         "agc": agc,
         "codec": codec,
@@ -164,7 +166,7 @@ if __name__ == "__main__":
     downsample_rate = None  # Process at native 48kHz, no resampling artifacts
     monitor_gain = 0.22
     
-    mic_channel_numbers = [0, 1, 2, 3]
+    mic_channel_numbers = [0, 1, 2, 3, 4, 5, 6, 7]
     
     """
     With 4 mics => Beamforming = 4-5ms
@@ -176,13 +178,13 @@ if __name__ == "__main__":
     # => 20ms blocks for the buffer (960/48kHz = 0.02s)
     
     logger = logging.getLogger("MicArrayTest")
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG)
     
     doa_logger = logging.getLogger("DOAEstimator")
-    doa_logger.setLevel(logging.INFO)
+    doa_logger.setLevel(logging.DEBUG)
     
     beamformer_logger = logging.getLogger("Beamformer")
-    beamformer_logger.setLevel(logging.INFO)
+    beamformer_logger.setLevel(logging.DEBUG)
     
     echo_canceller_logger = logging.getLogger("EchoCanceller")
     echo_canceller_logger.setLevel(logging.INFO)
@@ -212,7 +214,7 @@ if __name__ == "__main__":
     codec_logger.addHandler(console_handler)
 
     
-    geometry_path = script_dir / "array_geometries" / "1_square.xml"
+    geometry_path = script_dir / "array_geometries" / "2_corners.xml"
     mic_positions = MVDRBeamformer.load_positions_from_xml(str(geometry_path))
     
     # Passband to eliminate low-frequency rumble and high-frequency hiss

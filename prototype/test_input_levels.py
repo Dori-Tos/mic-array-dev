@@ -53,7 +53,7 @@ if __name__ == "__main__":
         logger=logger,
         update_rate=3.0,
         angle_range=(-25, 25),
-        beamformer=das_beamformer,
+        doa_beamformer=das_beamformer,
         scan_step_deg=5.0,
     )
     

@@ -276,7 +276,7 @@ def test_free_beam(
             logger=logger,
             update_rate=3.0,
             angle_range=(-25.0, 25.0),
-            beamformer=DASBeamformer(
+            doa_beamformer=DASBeamformer(
                 logger=logger,
                 mic_channel_numbers=mic_channel_numbers,
                 sample_rate=sample_rate,
@@ -394,7 +394,10 @@ def test_free_beam(
                         and hasattr(beamformer, "set_steering_angle")
                         and (doa_min_confidence_db is None or (doa_conf is not None and doa_conf >= float(doa_min_confidence_db)))
                     ):
-                        beamformer.set_steering_angle(float(doa_value))
+                        # Only update steering angle if it actually changed (avoid redundant updates)
+                        current_angle = beamformer.get_steering_angle() if hasattr(beamformer, "get_steering_angle") else None
+                        if current_angle is None or not np.isclose(float(doa_value), float(current_angle), atol=1e-4):
+                            beamformer.set_steering_angle(float(doa_value))
                 except Exception:
                     doa_value = None
                     doa_conf = None
@@ -433,7 +436,10 @@ def test_free_beam(
                         and hasattr(beamformer, "set_steering_angle")
                         and (doa_min_confidence_db is None or (doa_conf is not None and doa_conf >= float(doa_min_confidence_db)))
                     ):
-                        beamformer.set_steering_angle(float(doa_value))
+                        # Only update steering angle if it actually changed (avoid redundant updates)
+                        current_angle = beamformer.get_steering_angle() if hasattr(beamformer, "get_steering_angle") else None
+                        if current_angle is None or not np.isclose(float(doa_value), float(current_angle), atol=1e-4):
+                            beamformer.set_steering_angle(float(doa_value))
                         last_doa = float(doa_value)
                         last_conf = float(doa_conf) if doa_conf is not None else last_conf
                 except Exception:
