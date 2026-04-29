@@ -113,7 +113,7 @@ def test_polar_pattern(
     enable_spectral_filter=True,
     save_on_interrupt=False,
     process_block_ms=20.0,
-    num_mics=8,
+    num_mics=10,
     geometry=2,
 ):
     """
@@ -821,8 +821,8 @@ if __name__ == '__main__':
                         help='Processing chunk size in milliseconds used to apply the realtime processing chain (default: 5.0).')
     parser.add_argument('--save-on-interrupt', action=argparse.BooleanOptionalAction, default=False,
                         help='Save partial data when interrupted by Ctrl+C (default: disabled)')
-    parser.add_argument('--num-mics', type=int, default=8,
-                        help='Number of microphones to use (default: 8)')
+    parser.add_argument('--num-mics', type=int, default=10,
+                        help='Number of microphones to use (default: 10)')
     parser.add_argument('--geometry', type=int, default=2,
                         help="Geometry selector by XML filename prefix (default: 1). Example: --geometry 2 loads '2_*.xml'.")
     
