@@ -94,7 +94,7 @@ def _build_mode_components(
     codec,
 ):
     use_single_mic = mode == MODE_SINGLE
-    mic_channel_numbers = [0] if use_single_mic else [0, 1, 2, 3, 4, 5, 6, 7]
+    mic_channel_numbers = [0] if use_single_mic else [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
     mic_list = [Microphone(logger=logger, channel_number=i, sampling_rate=sample_rate) for i in mic_channel_numbers]
 
     if use_single_mic:
@@ -138,14 +138,14 @@ def _build_mode_components(
         logger=doa_logger,
         update_rate=3.0,
         angle_range=(-25, 25),
-        doa_beamformer=mvdr_beamformer,
+        doa_beamformer=das_beamformer,
         beamformer=mvdr_beamformer,
         scan_step_deg=3.0,
         smooth_step_deg=1.0,
         local_search_radius_deg=9.0,
         periodic_full_scan_blocks=20,
     )
-    # doa_estimator.freeze(0.0)
+    doa_estimator.freeze(0.0)
 
     return {
         "mic_list": mic_list,
@@ -166,12 +166,12 @@ if __name__ == "__main__":
     downsample_rate = None  # Process at native 48kHz, no resampling artifacts
     monitor_gain = 0.22
     
-    mic_channel_numbers = [0, 1, 2, 3, 4, 5, 6, 7]
+    mic_channel_numbers = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
     
     """
-    With 4 mics => Beamforming = 4-5ms
-    With 8 mics => Beamforming = 11-15ms
-    
+    With 4 mics => Beamforming = 4-5ms | DOA = 0.5-2ms
+    With 8 mics => Beamforming = 11-15ms | DOA = 0.5-4ms
+    with 10 mics => Beamforming = 13-16ms | DOA = 0.5-5ms
     """
         
     blocksize = 960
@@ -214,7 +214,7 @@ if __name__ == "__main__":
     codec_logger.addHandler(console_handler)
 
     
-    geometry_path = script_dir / "array_geometries" / "2_corners.xml"
+    geometry_path = script_dir / "array_geometries" / "3_Rim.xml"
     mic_positions = MVDRBeamformer.load_positions_from_xml(str(geometry_path))
     
     # Passband to eliminate low-frequency rumble and high-frequency hiss

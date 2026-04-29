@@ -233,21 +233,25 @@ def test_free_beam(
     # Initialize processing pipeline if requested
     if use_pipeline:
         print("Initializing audio processing pipeline...")
-        
-        # Microphone array geometry (same source as realtime pipeline)
-        mic_channel_numbers = [0, 1, 2, 3]
-        
+                
         if pattern == 1:
             pattern = "1_Square.xml"
+            mic_channel_numbers = [0, 1, 2, 3]
         
         elif pattern == 2:
-            pattern = "2_corners.xml"
+            pattern = "2_Corners.xml"
+            mic_channel_numbers = [0, 1, 2, 3, 4, 5, 6, 7]
             
         elif pattern == 3:
-            pattern = "3_large.xml"
+            pattern = "3_Rim.xml"
+            mic_channel_numbers = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+            
+        elif pattern == 4:
+            pattern = "4_Single_Corner.xml"
+            mic_channel_numbers = [0, 1, 2, 3]
             
         else:
-            raise ValueError(f"Invalid pattern value: {pattern}. Must be 1, 2, or 3.")
+            raise ValueError(f"Invalid pattern value: {pattern}. Must be 1, 2, 3, or 4.")
         
         geometry_path = Path(__file__).resolve().parent.parent / "array_geometries" / pattern
         mic_positions = MVDRBeamformer.load_positions_from_xml(str(geometry_path))

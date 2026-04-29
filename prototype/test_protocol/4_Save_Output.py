@@ -78,36 +78,39 @@ def _build_pipeline(
 	mic_positions = MVDRBeamformer.load_positions_from_xml(str(geometry_path))
 
 	das_beamformer = DASBeamformer(
-		logger=logger,
-		mic_channel_numbers=mic_channel_numbers,
-		sample_rate=sample_rate,
-		mic_positions_m=mic_positions,
+        logger=logger,
+        mic_channel_numbers=mic_channel_numbers,
+        sample_rate=sample_rate,
+        mic_positions_m=mic_positions,
 	)
+
+	beamformer = MVDRBeamformer(
+        logger=logger,
+        mic_channel_numbers=mic_channel_numbers,
+        sample_rate=sample_rate,
+        mic_positions_m=mic_positions,
+        covariance_alpha=0.95,
+        diagonal_loading=0.15,
+        spectral_whitening_factor=0.12,
+        weight_smooth_alpha=0.72,
+        max_adaptive_loading_scale=4.0,
+        coherence_suppression_strength=0.8,
+        weight_smooth_alpha_min=0.45,
+        weight_smooth_alpha_max=0.82,
+        snr_threshold_for_sharpening=2.0,
+        backward_null_strength=0.9,
+	)
+ 
+ 
 	doa_estimator = IterativeDOAEstimator(
 		logger=logger,
 		update_rate=3.0,
 		angle_range=(-25.0, 25.0),
-		doa_beamformer=mvdr_beamformer,
+		doa_beamformer=das_beamformer,
+		beamformer=beamformer,
 		scan_step_deg=5.0,
 		local_search_radius_deg=10.0,
 		periodic_full_scan_blocks=20,
-	)
-
-	beamformer = MVDRBeamformer(
-		logger=logger,
-		mic_channel_numbers=mic_channel_numbers,
-		sample_rate=sample_rate,
-		mic_positions_m=mic_positions,
-		covariance_alpha=0.95,
-		diagonal_loading=0.15,
-		spectral_whitening_factor=0.12,
-		weight_smooth_alpha=0.72,
-		max_adaptive_loading_scale=4.0,
-		coherence_suppression_strength=0.8,
-		weight_smooth_alpha_min=0.45,
-		weight_smooth_alpha_max=0.82,
-		snr_threshold_for_sharpening=2.0,
-		backward_null_strength=0.9,
 	)
 
 	filters = [
@@ -163,8 +166,8 @@ def run_save_output(
 	output_dir: str = "data/test_protocol/4_save_output",
 	sample_rate: int | None = None,
 	blocksize: int = 960,
-	num_mics: int = 4,
-	geometry: int = 1,
+	num_mics: int = 8,
+	geometry: int = 2,
 	freeze_beamformer: bool = False,
 	freeze_angle_deg: float = 0.0,
 	listen_output: bool = False,

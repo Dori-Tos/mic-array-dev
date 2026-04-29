@@ -219,10 +219,13 @@ def test_di_signal(
             pattern = "1_Square.xml"
         
         elif pattern == 2:
-            pattern = "2_corners.xml"
+            pattern = "2_Corners.xml"
             
         elif pattern == 3:
-            pattern = "3_large.xml"
+            pattern = "3_Rim.xml"
+            
+        elif pattern == 4:
+            pattern = "4_Single_Corner.xml"
             
         else:
             raise ValueError(f"Invalid pattern value: {pattern}. Must be 1, 2, or 3.")
