@@ -114,7 +114,7 @@ def test_continuous_gain(
 
 	if use_pipeline:
 		mic_channel_numbers = [0, 1, 2, 3]
-		geometry_path = Path(__file__).resolve().parent.parent / "array_geometries" / "1_square.xml"
+		geometry_path = Path(__file__).resolve().parent.parent / "array_geometries" / "1_Square.xml"
 		mic_positions = MVDRBeamformer.load_positions_from_xml(str(geometry_path))
 
 		beamformer = MVDRBeamformer(

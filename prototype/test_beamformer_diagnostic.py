@@ -47,7 +47,7 @@ if __name__ == "__main__":
     mic_list = [Microphone(logger=logger, channel_number=i, sampling_rate=sample_rate) for i in mic_channel_numbers]
     
     # Load mic positions from XML
-    geometry_path = script_dir / "array_geometries" / "1_square.xml"
+    geometry_path = script_dir / "array_geometries" / "1_Square.xml"
     mic_positions = MVDRBeamformer.load_positions_from_xml(str(geometry_path))
     
     try:

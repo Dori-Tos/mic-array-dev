@@ -238,7 +238,7 @@ def test_free_beam(
         mic_channel_numbers = [0, 1, 2, 3]
         
         if pattern == 1:
-            pattern = "1_square.xml"
+            pattern = "1_Square.xml"
         
         elif pattern == 2:
             pattern = "2_corners.xml"

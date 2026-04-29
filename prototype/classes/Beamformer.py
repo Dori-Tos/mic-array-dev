@@ -354,43 +354,6 @@ class MVDRBeamformer(Beamformer):
         self._prev_output = None
         self._prev_steering_angle_for_blend = None
     
-    # def reset_weight_history(self):
-    #     """
-    #     Reset the weight smoothing history to allow fresh weight computation.
-        
-    #     Used when DOA changes significantly (≥1°) to prevent lag-induced artifacts.
-    #     Setting _prev_weights = None breaks the smoothing chain for exactly 1 block,
-    #     allowing MVDR weights to recompute freely for the new steering direction
-    #     without being constrained by old weights from a different DOA.
-        
-    #     This fixes the fundamental problem: MVDR is nonlinear in steering vector,
-    #     and when DOA changes but old weights are applied to new steering matrix,
-    #     the solution becomes mismatched → phase/amplitude discontinuities → artifacts.
-    #     """
-    #     self._prev_weights = None
-    
-    # def reset_on_doa_change(self):
-    #     """
-    #     Complete reset of weight and covariance history on significant DOA changes.
-        
-    #     Resets BOTH _prev_weights and _covariance to enable instant adaptation to new
-    #     steering direction without lag-mismatch artifacts. This is stricter than 
-    #     reset_weight_history() and should only be used when DOA changes significantly (≥1°).
-        
-    #     Rationale:
-    #     - MVDR weights are nonlinear in both steering vector AND covariance matrix
-    #     - Weight smoothing alpha=0.72-0.82 adapts in 2-3 blocks (worst: 0.6s @ 5Hz)
-    #     - Covariance smoothing alpha=0.9 adapts in 10 blocks (worst: 2s @ 5Hz)
-    #     - When DOA changes, both must adapt, not just weights
-    #     - Resetting both allows instant recalculation in Block N+1
-    #     - Covariance still smooths gradually from fresh spectrum (acceptable)
-        
-    #     Without this, new steering applied to old covariance creates discontinuities
-    #     → output amplitude/phase swings at block boundaries → pops in audio
-    #     """
-    #     self._prev_weights = None
-    #     self._covariance = None
-    
     def get_last_coherence(self) -> np.ndarray | None:
         """
         Retrieve the coherence signal from the last process() call.
@@ -696,8 +659,10 @@ class MVDRBeamformer(Beamformer):
         angle = self.get_steering_angle() if theta_deg is None else float(theta_deg)
         result = self.process(block, angle)
 
-        # Output-level boundary taper: apply a short fade near the block edges
-        # without feeding previous output back into the next block.
+        # Output-level boundary crossfade: apply fade-in and fade-out near block edges
+        # to smooth discontinuities caused by adaptive weight smoothing.
+        # This must happen HERE (at beamformer output) before filters/AGC process the signal,
+        # so the crossfade fixes the problem at its source, not as a post-hoc patch.
         result_arr = np.asarray(result, dtype=np.float64)
 
         n_fade_samples = min(len(result_arr) // 8, 64)

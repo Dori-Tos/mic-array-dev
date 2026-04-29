@@ -87,7 +87,7 @@ def _build_pipeline(
 		logger=logger,
 		update_rate=3.0,
 		angle_range=(-25.0, 25.0),
-		doa_beamformer=das_beamformer,
+		doa_beamformer=mvdr_beamformer,
 		scan_step_deg=5.0,
 		local_search_radius_deg=10.0,
 		periodic_full_scan_blocks=20,

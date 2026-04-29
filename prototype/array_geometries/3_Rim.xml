@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?><MicArray name="3_rim">
   <!--
     Large Rectangle (with microphones on the rim) layout in x-z plane.
-    12 Microphones present.
+    10 Microphones present.
     Convention:
     - Placed according to array center
     - Axes & angles are taken from the array's perspective
@@ -15,8 +15,7 @@
     - Pair 3-4: ch3 right, ch4 left (upper right side)
     - Pair 5-6: ch5 right, ch6 left (lower left side)
     - Pair 7-8: ch7 right, ch8 left (lower right side)
-    - Pair 9-10: ch9 right, ch10 left (upper middle side)
-    - Pair 11-12: ch11 right, ch12 left (lower middle side)
+    - Pair 9-10: ch9 right, ch10 left (middle side)
   -->
   
   <pos Name="Point 1" x="-0.1625" y="0.0" z="0.075525"/>
@@ -27,8 +26,6 @@
   <pos Name="Point 6" x="-0.11725" y="0.0" z="-0.12095"/>
   <pos Name="Point 7" x="0.11725" y="0.0" z="-0.12095"/>
   <pos Name="Point 8" x="0.1625" y="0.0" z="-0.075525"/>
-  <pos Name="Point 9" x="-0.0455" y="0.0" z="0.12095"/>
-  <pos Name="Point 10" x="0.0455" y="0.0" z="0.12095"/>
-  <pos Name="Point 11" x="-0.0455" y="0.0" z="-0.12095"/>
-  <pos Name="Point 12" x="0.0455" y="0.0" z="-0.12095"/>
+  <pos Name="Point 9" x="0.0275" y="0.0" z="0.12095"/>
+  <pos Name="Point 10" x="-0.0275" y="0.0" z="-0.12095"/>
 </MicArray>

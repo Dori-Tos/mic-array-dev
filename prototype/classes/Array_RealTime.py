@@ -163,6 +163,8 @@ class Array_RealTime(Array):
         self._output_buffered_samples = 0
         self._output_max_buffer_samples = int(self._output_playback_rate * 1.0)
         self._output_prev_sample = 0.0
+        # Hold previous processed chunk to perform overlap-add joins
+        self._output_prev_mono = None
         fade_ms = max(0.0, float(output_boundary_fade_ms))
         self._output_fade_samples = int(self._output_playback_rate * (fade_ms / 1000.0))
 
@@ -529,6 +531,14 @@ class Array_RealTime(Array):
         tapered[-fade_n:] *= fade_out
         return tapered
 
+    def _apply_output_boundary_ramp(self, chunk: np.ndarray, prev_sample: float) -> np.ndarray:
+        """
+        No-op placeholder. The main crossfade is now applied in Beamformer.apply()
+        at the source of the discontinuities, before filters and AGC process the signal.
+        This ensures the crossfade fixes the problem at its origin rather than post-hoc.
+        """
+        return chunk
+
     def _send_codec_chunk(self, mono_out: np.ndarray, sample_rate: int):
         if not self._codec_stream_active:
             return
@@ -735,24 +745,53 @@ class Array_RealTime(Array):
                 if self.output_mode == "codec":
                     self._send_codec_chunk(mono_out, int(processing_rate))
                 else:
+                    # Perform overlap-add join with previous processed chunk to eliminate block-boundary
+                    # discontinuities. We delay appending the previous chunk until the next chunk
+                    # is available so we can equal-power overlap-add the boundary.
                     with self._output_fifo_lock:
-                        self._output_fifo.append(mono_out)
-                        self._output_buffered_samples += mono_out.size
-                        trimmed_chunks = 0
-                        trimmed_samples = 0
-                        while self._output_buffered_samples > self._output_max_buffer_samples and len(self._output_fifo) > 0:
-                            old = self._output_fifo.popleft()
-                            self._output_buffered_samples -= old.size
-                            trimmed_chunks += 1
-                            trimmed_samples += int(old.size)
-                        if trimmed_chunks > 0:
-                            now_trim = time.monotonic()
-                            if (now_trim - self._debug_state["output_fifo_trim_last"]) >= self._debug_log_interval_s:
-                                self.logger.debug(
-                                    f"[Output FIFO] Trimmed {trimmed_chunks} chunk(s), {trimmed_samples} samples; "
-                                    f"buffer now {self._output_buffered_samples} samples"
-                                )
-                                self._debug_state["output_fifo_trim_last"] = now_trim
+                        prev = self._output_prev_mono
+                        if prev is None:
+                            # Hold this chunk until next arrives
+                            self._output_prev_mono = mono_out
+                        else:
+                            # Compute fade length
+                            if self._output_fade_samples <= 0:
+                                fade_n = 0
+                            else:
+                                fade_n = int(min(self._output_fade_samples, prev.size, mono_out.size, max(1, prev.size // 2), max(1, mono_out.size // 2)))
+
+                            if fade_n > 0:
+                                t = np.linspace(0.0, 1.0, fade_n, dtype=np.float32)
+                                fade_in = np.sin(0.5 * np.pi * t)
+                                fade_out = np.cos(0.5 * np.pi * t)
+
+                                combined = prev.copy()
+                                combined[-fade_n:] = combined[-fade_n:] * fade_out + mono_out[:fade_n] * fade_in
+                                combined = np.concatenate((combined, mono_out[fade_n:]))
+                            else:
+                                combined = np.concatenate((prev, mono_out))
+
+                            self._output_fifo.append(combined)
+                            self._output_buffered_samples += combined.size
+                            # Clear held previous chunk
+                            self._output_prev_mono = None
+
+                            # Trim buffer if necessary
+                            trimmed_chunks = 0
+                            trimmed_samples = 0
+                            while self._output_buffered_samples > self._output_max_buffer_samples and len(self._output_fifo) > 0:
+                                old = self._output_fifo.popleft()
+                                self._output_buffered_samples -= old.size
+                                trimmed_chunks += 1
+                                trimmed_samples += int(old.size)
+                            if trimmed_chunks > 0:
+                                now_trim = time.monotonic()
+                                if (now_trim - self._debug_state["output_fifo_trim_last"]) >= self._debug_log_interval_s:
+                                    self.logger.debug(
+                                        f"[Output FIFO] Trimmed {trimmed_chunks} chunk(s), {trimmed_samples} samples; "
+                                        f"buffer now {self._output_buffered_samples} samples"
+                                    )
+                                    self._debug_state["output_fifo_trim_last"] = now_trim
 
             if self.sampling_rate != original_rate:
                 self.sampling_rate = original_rate
@@ -998,6 +1037,10 @@ class Array_RealTime(Array):
                     if len(self._output_fifo) > 0:
                         self._output_current_chunk = self._output_fifo.popleft()
                         self._output_buffered_samples -= self._output_current_chunk.size
+                        self._output_current_chunk = self._apply_output_boundary_ramp(
+                            self._output_current_chunk,
+                            self._output_prev_sample,
+                        )
                     else:
                         now_underflow = time.monotonic()
                         if (now_underflow - self._debug_state["output_underflow_last"]) >= self._debug_log_interval_s:
@@ -1009,6 +1052,7 @@ class Array_RealTime(Array):
             take = min(remaining, self._output_current_chunk.size)
             if take > 0:
                 chunk[write_idx:write_idx + take] = self._output_current_chunk[:take]
+                self._output_prev_sample = float(self._output_current_chunk[take - 1])
                 self._output_current_chunk = self._output_current_chunk[take:]
                 write_idx += take
 

@@ -121,7 +121,7 @@ def _build_mode_components(mode: int, logger: logging.Logger, script_dir: Path, 
     doa_estimator = None
 
     if enable_beamformer:
-        geometry_path = script_dir / "array_geometries" / "1_square.xml"
+        geometry_path = script_dir / "array_geometries" / "1_Square.xml"
         mic_positions = MVDRBeamformer.load_positions_from_xml(str(geometry_path))
 
         das_beamformer = DASBeamformer(

@@ -37,7 +37,7 @@ if __name__ == "__main__":
 
     
     mic_list = [Microphone(logger=logger, channel_number=i, sampling_rate=sample_rate) for i in mic_channel_numbers]
-    geometry_path = script_dir / "array_geometries" / "1_square.xml"
+    geometry_path = script_dir / "array_geometries" / "1_Square.xml"
     mic_positions = MVDRBeamformer.load_positions_from_xml(str(geometry_path))
     
     # DAS for DOA estimation (faster than MVDR)
@@ -60,7 +60,7 @@ if __name__ == "__main__":
         logger=logger,
         update_rate=3.0,
         angle_range=(-25, 25),
-        doa_beamformer=das_beamformer,  # Use DAS for fast DOA scanning
+        doa_beamformer=mvdr_beamformer,  # Use DAS for fast DOA scanning
         scan_step_deg=5.0,
     )
     echo_canceller = EchoCanceller(logger=logger, sample_rate=sample_rate, channels=4)

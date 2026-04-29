@@ -138,7 +138,7 @@ def _build_mode_components(
         logger=doa_logger,
         update_rate=3.0,
         angle_range=(-25, 25),
-        doa_beamformer=das_beamformer,
+        doa_beamformer=mvdr_beamformer,
         beamformer=mvdr_beamformer,
         scan_step_deg=3.0,
         smooth_step_deg=1.0,

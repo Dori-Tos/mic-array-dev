@@ -252,7 +252,7 @@ def test_di_noise(
         
         # Microphone array geometry (same source as realtime pipeline)
         mic_channel_numbers = [0, 1, 2, 3]
-        geometry_path = Path(__file__).resolve().parent.parent / "array_geometries" / "1_square.xml"
+        geometry_path = Path(__file__).resolve().parent.parent / "array_geometries" / "1_Square.xml"
         mic_positions = MVDRBeamformer.load_positions_from_xml(str(geometry_path))
         
         # MVDR Beamformer (same config as test_pipeline.py)

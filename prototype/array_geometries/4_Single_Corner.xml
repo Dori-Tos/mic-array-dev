@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?><MicArray name="4_single_corner">
+  <!--
+    Large Rectangle Corner layout in x-z plane.
+    4 Microphones present.
+    Convention:
+    - Placed according to array center
+    - Axes & angles are taken from the array's perspective
+    - +x is right, -x is left
+    - +y is front
+    - 0° points to +y (front center)
+    - +angle points to the right side (+x)
+
+    Channel mapping:
+    - Pair 1-2: ch1 right, ch2 left (upper horizontal pair)
+    - Pair 3-4: ch3 right, ch4 left (lower vertical pair)
+  -->
+  <pos Name="Point 1" x="0.11725" y="0.0" z="0.12095"/>
+  <pos Name="Point 2" x="0.0275" y="0.0" z="0.12095"/>
+  <pos Name="Point 3" x="0.1625" y="0.0" z="0.075525"/>
+  <pos Name="Point 4" x="0.1625" y="0.0" z="0.0"/>
+</MicArray>
