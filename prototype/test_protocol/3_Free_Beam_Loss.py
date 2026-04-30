@@ -286,6 +286,7 @@ def test_free_beam(
                 sample_rate=sample_rate,
                 mic_positions_m=mic_positions,
             ),
+            beamformer=beamformer,
             scan_step_deg=5.0,
             local_search_radius_deg=10.0,
             periodic_full_scan_blocks=20,
