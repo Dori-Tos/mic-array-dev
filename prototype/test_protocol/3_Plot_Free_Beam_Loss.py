@@ -138,6 +138,7 @@ def plot_gain_vs_angle(
 	ax = fig.add_subplot(111)
 	ax.plot(angles, gains, marker="o", linewidth=2)
 	ax.set_xlabel("Signal Angle")
+	ax.set_xticks(angles, labels=angles.astype(int))
 	ax.set_ylabel("Gain (dB)")
 	ax.set_title(title or default_title)
 	ax.grid(True, alpha=0.3)

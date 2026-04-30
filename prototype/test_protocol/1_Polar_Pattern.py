@@ -113,7 +113,7 @@ def test_polar_pattern(
     enable_spectral_filter=True,
     save_on_interrupt=False,
     process_block_ms=20.0,
-    num_mics=10,
+    num_mics=8,
     geometry=2,
 ):
     """
@@ -302,14 +302,21 @@ def test_polar_pattern(
                 )
             return matches[0]
         
-        # Microphone array geometry (same source as realtime pipeline)
+        if geometry == 1:
+            num_mics = 4
+        elif geometry == 2:
+            num_mics = 8
+        elif geometry == 3:
+            num_mics = 10
+        elif geometry == 4:
+            num_mics = 4
+        
         mic_channel_numbers = list(range(int(num_mics)))
         
         geometry_path = _resolve_geometry_path(int(geometry))
         print(f"  Using geometry file: {geometry_path.name}")
         mic_positions = MVDRBeamformer.load_positions_from_xml(str(geometry_path))
         
-        # MVDR Beamformer (same config as test_pipeline.py)
         beamformer = MVDRBeamformer(
             logger=logger,
             mic_channel_numbers=mic_channel_numbers,
@@ -327,7 +334,6 @@ def test_polar_pattern(
             backward_null_strength=0.9,
         )
         
-        # Filters (same config as test_pipeline.py)
         filters: list[object] = [
             BandPassFilter(
                 logger=logger,
@@ -344,38 +350,37 @@ def test_polar_pattern(
                     logger=logger,
                     sample_rate=sample_rate,
                     noise_factor=0.65,
-                    gain_floor=0.55,  # Updated from 0.35 (prevents over-suppression of low freqs)
+                    gain_floor=0.55,
                     noise_alpha=0.995,
                     noise_update_snr_db=8.0,
                     gain_smooth_alpha=0.92,
                 )
             )
         
-        # AGC chain (same config as test_pipeline.py)
         if enable_agc:
             agc = AGCChain(logger=logger, stages=[
                 AdaptiveAmplifier(
                     logger=logger,
                     target_rms=0.08,
                     min_gain=1.0,
-                    max_gain=6.0,  # Updated from 12.0 (prevent oscillation)
+                    max_gain=6.0, 
                     adapt_alpha=0.04,
                     speech_activity_rms=0.00012,
                     silence_decay_alpha=0.008,
                     activity_hold_ms=600.0,
-                    peak_protect_threshold=0.30,  # Updated from 0.35
-                    peak_protect_strength=1.0,  # Updated from 0.85 (maximum protection)
+                    peak_protect_threshold=0.30,
+                    peak_protect_strength=1.0, 
                     max_gain_warn_rms_min=0.001,
                 ),
                 PedalboardAGC(
                     logger=logger,
                     sample_rate=sample_rate,
                     threshold_db=-20.0,
-                    ratio=2.0,  # Updated from 3.5 (gentler compression)
+                    ratio=2.0, 
                     attack_ms=3.0,
                     release_ms=140.0,
-                    limiter_threshold_db=-7.0,  # Updated from -1.4 (much lower headroom)
-                    limiter_release_ms=50.0  # Updated from 100.0
+                    limiter_threshold_db=-7.0, 
+                    limiter_release_ms=50.0
                 ),
             ])
         else:
