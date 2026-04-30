@@ -256,7 +256,6 @@ def test_free_beam(
         geometry_path = Path(__file__).resolve().parent.parent / "array_geometries" / pattern
         mic_positions = MVDRBeamformer.load_positions_from_xml(str(geometry_path))
         
-        # MVDR Beamformer (same config as test_pipeline.py)
         beamformer = MVDRBeamformer(
             logger=logger,
             mic_channel_numbers=mic_channel_numbers,
@@ -273,22 +272,23 @@ def test_free_beam(
             snr_threshold_for_sharpening=2.0,
             backward_null_strength=0.9,
         )
+        
+        das_beamformer=DASBeamformer(
+            logger=logger,
+            mic_channel_numbers=mic_channel_numbers,
+            sample_rate=sample_rate,
+            mic_positions_m=mic_positions,
+        )
 
-        # DOA estimator (mirrors Array_RealTime behavior when beamformer is unfrozen)
-        # Use a DAS beamformer for fast scanning.
         doa_estimator = IterativeDOAEstimator(
             logger=logger,
             update_rate=3.0,
             angle_range=(-25.0, 25.0),
-            doa_beamformer=DASBeamformer(
-                logger=logger,
-                mic_channel_numbers=mic_channel_numbers,
-                sample_rate=sample_rate,
-                mic_positions_m=mic_positions,
-            ),
+            doa_beamformer=das_beamformer,
             beamformer=beamformer,
-            scan_step_deg=5.0,
-            local_search_radius_deg=10.0,
+            scan_step_deg=3.0,
+            smooth_step_deg=1.0,
+            local_search_radius_deg=9.0,
             periodic_full_scan_blocks=20,
         )
         
