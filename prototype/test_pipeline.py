@@ -88,13 +88,15 @@ def _build_mode_components(
     agc_logger: logging.Logger,
     codec_logger: logging.Logger,
     sample_rate: int,
+    mic_channel_numbers: list[int],
     mic_positions,
     agc,
     filters,
     codec,
 ):
     use_single_mic = mode == MODE_SINGLE
-    mic_channel_numbers = [0] if use_single_mic else [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    if use_single_mic:
+        mic_channel_numbers = [0]
     mic_list = [Microphone(logger=logger, channel_number=i, sampling_rate=sample_rate) for i in mic_channel_numbers]
 
     if use_single_mic:
@@ -166,8 +168,6 @@ if __name__ == "__main__":
     downsample_rate = None  # Process at native 48kHz, no resampling artifacts
     monitor_gain = 0.22
     
-    mic_channel_numbers = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-    
     """
     With 4 mics => Beamforming = 4-5ms | DOA = 0.5-2ms
     With 8 mics => Beamforming = 11-15ms | DOA = 0.5-4ms
@@ -213,9 +213,25 @@ if __name__ == "__main__":
     agc_logger.addHandler(console_handler)
     codec_logger.addHandler(console_handler)
 
+    geometry = 4
     
-    geometry_path = script_dir / "array_geometries" / "3_Rim.xml"
-    mic_positions = MVDRBeamformer.load_positions_from_xml(str(geometry_path))
+    if geometry == 1:
+        geometry_path = "1_Square.xml"
+        mic_channel_numbers = [0, 1, 2, 3]
+    elif geometry == 2:
+        geometry_path = "2_Corners.xml"
+        mic_channel_numbers = [0, 1, 2, 3, 4, 5, 6, 7]
+    elif geometry == 3:
+        geometry_path = "3_Rim.xml"
+        mic_channel_numbers = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    elif geometry == 4:
+        geometry_path = "4_Single_Corner.xml"
+        mic_channel_numbers = [2, 3, 8, 9]
+    else:
+        raise ValueError("Invalid geometry selection")
+
+    path = script_dir / "array_geometries" / geometry_path
+    mic_positions = MVDRBeamformer.load_positions_from_xml(str(path))
     
     # Passband to eliminate low-frequency rumble and high-frequency hiss
     # Spectral Subtraction to supress background noise in voice region
@@ -292,6 +308,7 @@ if __name__ == "__main__":
         agc_logger=agc_logger,
         codec_logger=codec_logger,
         sample_rate=sample_rate,
+        mic_channel_numbers=mic_channel_numbers,
         mic_positions=mic_positions,
         agc=agc,
         filters=filters,
@@ -352,6 +369,7 @@ if __name__ == "__main__":
                     logger=logger,
                     sample_rate=sample_rate,
                     mic_positions=mic_positions,
+                    mic_channel_numbers=mic_channel_numbers,
                     agc=agc,
                     filters=filters,
                     codec=codec,
