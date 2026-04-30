@@ -746,6 +746,9 @@ if __name__ == '__main__':
                         help='Comma-separated angle list in degrees (default fixed list)')
     parser.add_argument('--device', type=int, default=None,
                         help='Audio device index (default: system default input device)')
+    parser.add_argument('--geometry', type=int, default=2,
+                        help="Geometry selector by XML filename prefix (default: 1). Example: --geometry 2 loads '2_*.xml'.")
+
     
     parser.add_argument('--duration', type=float, default=2.0,
                         help='Audio sample duration in seconds (default: 2.0). '
@@ -785,6 +788,7 @@ if __name__ == '__main__':
         num_passes=args.passes,
         angles=angle_list,
         device_index=args.device,
+        pattern=args.geometry,
         sample_duration=args.duration,
         settle_seconds=args.settle_seconds,
         output_dir=args.output,
