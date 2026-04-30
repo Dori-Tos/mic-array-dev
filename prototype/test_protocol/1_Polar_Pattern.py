@@ -302,6 +302,8 @@ def test_polar_pattern(
                 )
             return matches[0]
         
+        mic_channel_numbers = list(range(int(num_mics)))
+        
         if geometry == 1:
             num_mics = 4
         elif geometry == 2:
@@ -310,8 +312,7 @@ def test_polar_pattern(
             num_mics = 10
         elif geometry == 4:
             num_mics = 4
-        
-        mic_channel_numbers = list(range(int(num_mics)))
+            mic_channel_numbers = [2, 3, 8, 9] 
         
         geometry_path = _resolve_geometry_path(int(geometry))
         print(f"  Using geometry file: {geometry_path.name}")
