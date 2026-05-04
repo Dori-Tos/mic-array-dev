@@ -160,22 +160,29 @@ class BandStopFilter(Filter):
 
 class WienerFilter(Filter):
     """
-    Adaptive spectral Wiener denoiser with speech-aware enhancements for streaming 1D/2D audio blocks.
+    Adaptive spectral Wiener denoiser with 50% overlap-add (COLA) processing.
+    
+    Universal implementation using decision-directed a priori SNR (Ephraim-Malah) 
+    to smooth per-bin gains on steady tones (e.g., vowels). Works well on voice, 
+    music, machinery, and ambient sound without speech-specific assumptions.
+    
+    **How it works**:
+    1. Accumulates input in a buffer (50% overlap)
+    2. Applies Hann window to frame (COLA-compliant)
+    3. Computes FFT magnitude spectrum
+    4. Tracks noise PSD and computes decision-directed a priori SNR
+    5. Computes Wiener gain from a priori SNR (not noisy instantaneous SNR)
+    6. Inverse FFT with overlap-add blending for smooth transitions
+    
+    Decision-directed approach prevents chasing on narrowband tones (vowels)
+    while maintaining fast adaptation to transients.
 
-    Speech-aware features:
-    - Pre-emphasis boost (2–4 kHz) for consonant preservation
-    - Formant preservation (protects vowel resonances at F1/F2/F3)
-    - Spectral continuity detection (smooth regions = speech; spiky = noise)
-    - Frequency-dependent gain floor (gentler on speech bands, aggressive on rumble/hiss)
-
-    :param noise_alpha: EMA factor for noise PSD tracking (higher = slower updates).
-    :param gain_floor: Minimum spectral gain to avoid musical artifacts.
-    :param gain_smooth_alpha: Temporal smoothing factor for per-bin gain.
-    :param noise_update_snr_db: Update noise model when frame SNR is below this threshold.
-    :param noise_update_rms: Force noise update for very quiet frames.
-    :param pre_emphasis_db: Boost amount (dB) for consonant region 2–4 kHz (default: 3.0 dB).
-    :param formant_preservation_db: Boost amount (dB) for formant regions (default: 2.0 dB).
-    :param spectral_continuity_factor: Smoothing bias toward speech-like regions (0–1, default: 0.4).
+    :param noise_alpha: EMA factor for noise PSD tracking (default: 0.985).
+    :param gain_floor: Minimum spectral gain to avoid musical artifacts (default: 0.12).
+    :param gain_smooth_alpha: Temporal smoothing for per-bin gain (default: 0.75).
+    :param apriori_smooth_alpha: Decision-directed a priori SNR smoothing (default: 0.98).
+    :param noise_update_snr_db: Update noise when frame SNR below threshold (default: 8.0 dB).
+    :param noise_update_rms: Force noise update for very quiet frames (default: 8e-4).
     """
 
     def __init__(
@@ -183,180 +190,232 @@ class WienerFilter(Filter):
         logger: logging.Logger,
         sample_rate: int,
         noise_alpha: float = 0.985,
-        gain_floor: float = 0.05,
-        gain_smooth_alpha: float = 0.3,
-        noise_update_snr_db: float = 6.0,
+        gain_floor: float = 0.12,
+        gain_smooth_alpha: float = 0.75,
+        apriori_smooth_alpha: float = 0.98,
+        noise_update_snr_db: float = 8.0,
         noise_update_rms: float = 8e-4,
-        pre_emphasis_db: float = 3.0,
-        formant_preservation_db: float = 2.0,
-        spectral_continuity_factor: float = 0.4,
     ):
         super().__init__(logger, sample_rate, order=1)
         if not 0.0 < noise_alpha < 1.0:
             raise ValueError("noise_alpha must be in (0, 1)")
         if not 0.0 <= gain_floor <= 1.0:
             raise ValueError("gain_floor must be in [0, 1]")
-        if not 0.0 <= gain_smooth_alpha < 1.0:
-            raise ValueError("gain_smooth_alpha must be in [0, 1)")
+        if not 0.0 < gain_smooth_alpha <= 1.0:
+            raise ValueError("gain_smooth_alpha must be in (0, 1]")
+        if not 0.0 < apriori_smooth_alpha < 1.0:
+            raise ValueError("apriori_smooth_alpha must be in (0, 1)")
         if noise_update_rms < 0.0:
             raise ValueError("noise_update_rms must be >= 0")
-        if pre_emphasis_db < 0:
-            raise ValueError("pre_emphasis_db must be >= 0")
-        if formant_preservation_db < 0:
-            raise ValueError("formant_preservation_db must be >= 0")
-        if not 0.0 <= spectral_continuity_factor <= 1.0:
-            raise ValueError("spectral_continuity_factor must be in [0, 1]")
 
         self.noise_alpha = float(noise_alpha)
         self.gain_floor = float(gain_floor)
         self.gain_smooth_alpha = float(gain_smooth_alpha)
+        self.apriori_smooth_alpha = float(apriori_smooth_alpha)
         self.noise_update_snr_db = float(noise_update_snr_db)
         self.noise_update_rms = float(noise_update_rms)
-        self.pre_emphasis_db = float(pre_emphasis_db)
-        self.formant_preservation_db = float(formant_preservation_db)
-        self.spectral_continuity_factor = float(spectral_continuity_factor)
         self._eps = 1e-12
 
-        self._noise_psd_1d: np.ndarray | None = None
-        self._prev_gain_1d: np.ndarray | None = None
-        self._noise_psd_2d: list[np.ndarray] | None = None
-        self._prev_gain_2d: list[np.ndarray] | None = None
-        self._prev_power_1d: np.ndarray | None = None
-        self._prev_power_2d: list[np.ndarray] | None = None
-
-    def reset(self):
+        # 50% overlap-add buffers
+        self.hop_size = None
+        self._input_buffer_1d = None
+        self._output_buffer_1d = None
         self._noise_psd_1d = None
         self._prev_gain_1d = None
+        self._prev_apriori_snr_1d = None  # For decision-directed smoothing
+
+        self._input_buffer_2d = None
+        self._output_buffer_2d = None
         self._noise_psd_2d = None
         self._prev_gain_2d = None
-        self._prev_power_1d = None
-        self._prev_power_2d = None
+        self._prev_apriori_snr_2d = None
 
-    def _speech_aware_gain_floor(self, freq_hz: np.ndarray) -> np.ndarray:
+    def reset(self):
+        """Reset all state."""
+        self.hop_size = None
+        self._input_buffer_1d = None
+        self._output_buffer_1d = None
+        self._noise_psd_1d = None
+        self._prev_gain_1d = None
+        self._prev_apriori_snr_1d = None
+        self._input_buffer_2d = None
+        self._output_buffer_2d = None
+        self._noise_psd_2d = None
+        self._prev_gain_2d = None
+        self._prev_apriori_snr_2d = None
+
+    def _process_frame(self, frame: np.ndarray, noise_psd: np.ndarray | None, prev_gain: np.ndarray | None = None, prev_apriori_snr: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
-        Compute frequency-dependent gain floor.
-        - Gentle on speech band (300–3000 Hz): gain_floor
-        - Aggressive on rumble (<100 Hz): gain_floor * 0.3
-        - Aggressive on hiss (>7000 Hz): gain_floor * 0.2
+        Process a single frame with Wiener denoising using decision-directed a priori SNR.
+        
+        Returns: (output_frame, updated_noise_psd, smoothed_gain, a_priori_snr)
         """
-        floor = np.ones_like(freq_hz, dtype=np.float64) * self.gain_floor
-        floor[freq_hz < 100] *= 0.1
-        floor[freq_hz > 7000] *= 0.2
-        return floor
+        frame_len = len(frame)
 
-    def _formant_preservation_boost(self, freq_hz: np.ndarray) -> np.ndarray:
-        """
-        Boost gain in typical formant regions (vowel resonances):
-        - F1: 500–1000 Hz (vowel identity)
-        - F2: 1500–2500 Hz (consonant-vowel transition)
-        - F3: 2500–3500 Hz (voice quality)
-        - Pre-emphasis: 2000–4000 Hz (consonant sharpness)
-        """
-        pre_emphasis_linear = 10.0 ** (self.pre_emphasis_db / 20.0)
-        formant_linear = 10.0 ** (self.formant_preservation_db / 20.0)
+        # Single-window approach: Hann on analysis side only (COLA-compliant)
+        window = np.hanning(frame_len)
+        x_windowed = frame * window
 
-        boost = np.ones_like(freq_hz, dtype=np.float64)
-        boost[(freq_hz >= 500) & (freq_hz <= 1000)] *= formant_linear  # F1
-        boost[(freq_hz >= 1500) & (freq_hz <= 2500)] *= formant_linear  # F2
-        boost[(freq_hz >= 2500) & (freq_hz <= 3500)] *= formant_linear  # F3
-        boost[(freq_hz >= 2000) & (freq_hz <= 4000)] *= pre_emphasis_linear  # Pre-emphasis
-        return boost
-
-    def _spectral_continuity(self, power: np.ndarray, prev_power: np.ndarray | None) -> np.ndarray:
-        """
-        Detect spectral continuity (smooth regions likely speech, spiky regions likely noise).
-        Returns a smoothness mask [0, 1]: high = smooth speech-like, low = spiky noise-like.
-        """
-        if prev_power is None or prev_power.shape != power.shape:
-            return np.ones_like(power, dtype=np.float64)
-
-        # Normalized difference between consecutive frames
-        diff = np.abs(power - prev_power) / (np.abs(prev_power) + self._eps)
-        # Smooth regions have low diff; spiky regions have high diff
-        # Invert: continuity = 1 / (1 + diff) => high continuity for smooth, low for spiky
-        continuity = 1.0 / (1.0 + np.clip(diff, 0, 10.0))
-        return continuity
-
-    def _denoise_channel(
-        self,
-        x: np.ndarray,
-        noise_psd: np.ndarray | None,
-        prev_gain: np.ndarray | None,
-        prev_power: np.ndarray | None,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        x = np.asarray(x, dtype=np.float64).reshape(-1)
-        if x.size == 0:
-            empty = np.array([], dtype=np.float64)
-            return empty, np.array([], dtype=np.float64), np.array([], dtype=np.float64), np.array([], dtype=np.float64)
-
-        x_fft = np.fft.rfft(x)
+        # FFT
+        x_fft = np.fft.rfft(x_windowed)
         power = (np.abs(x_fft) ** 2).astype(np.float64, copy=False)
 
+        # Initialize or update noise PSD
         if noise_psd is None or noise_psd.shape != power.shape:
             noise_psd = power.copy()
         else:
-            frame_rms = float(np.sqrt(np.mean(x * x) + self._eps))
-            frame_snr_db = 10.0 * np.log10((float(np.mean(power)) + self._eps) / (float(np.mean(noise_psd)) + self._eps))
-            if frame_rms <= self.noise_update_rms or frame_snr_db <= self.noise_update_snr_db:
+            frame_rms = float(np.sqrt(np.mean(frame * frame) + self._eps))
+            snr_db = 10.0 * np.log10((np.mean(power) + self._eps) / (np.mean(noise_psd) + self._eps))
+            
+            # Conservative update: only when SNR is low AND frame is not very quiet
+            if snr_db < self.noise_update_snr_db and frame_rms > self.noise_update_rms:
                 noise_psd = self.noise_alpha * noise_psd + (1.0 - self.noise_alpha) * power
 
-        # Compute speech-aware gains
-        freq_bins = np.fft.rfftfreq(x.size, d=1.0 / self.sample_rate)
-        speech_floor = self._speech_aware_gain_floor(freq_bins)
-        formant_boost = self._formant_preservation_boost(freq_bins)
-        continuity_mask = self._spectral_continuity(power, prev_power)
-
-        # Base Wiener gain
+        # Decision-directed a priori SNR (Ephraim-Malah style)
+        # Smooths per-bin SNR over frames to prevent chasing on steady tones
         post_snr = power / (noise_psd + self._eps)
-        wiener_gain = np.maximum(speech_floor, (post_snr - 1.0) / np.maximum(post_snr, self._eps))
-
-        # Apply formant preservation: reduce suppression on speech-like frequencies
-        gain = wiener_gain * formant_boost
-
-        # Apply spectral continuity bias: smooth regions get more gain (less suppression)
-        # Add continuity-aware boost to smooth regions (likely speech)
-        continuity_boost = 1.0 + (continuity_mask - 0.5) * self.spectral_continuity_factor
-        gain = gain * np.clip(continuity_boost, 0.7, 1.3)
-
-        if prev_gain is None or prev_gain.shape != gain.shape:
-            smoothed_gain = gain
+        
+        if prev_gain is None or prev_gain.shape != post_snr.shape or prev_apriori_snr is None:
+            # Initialize: use max(post_snr - 1, 0) as initial a priori SNR
+            apriori_snr = np.maximum(post_snr - 1.0, 0.0)
         else:
-            smoothed_gain = self.gain_smooth_alpha * prev_gain + (1.0 - self.gain_smooth_alpha) * gain
+            # Smooth: xi_hat = alpha * (prev_gain^2 * prev_output_power / noise) + (1-alpha) * max(post_snr - 1, 0)
+            # Simplified: use prev a priori directly for continuity
+            apriori_snr = self.apriori_smooth_alpha * prev_apriori_snr + (1.0 - self.apriori_smooth_alpha) * np.maximum(post_snr - 1.0, 0.0)
 
-        y_fft = x_fft * smoothed_gain
-        y = np.fft.irfft(y_fft, n=x.size)
-        return y.astype(np.float64, copy=False), noise_psd, smoothed_gain, power
+        # Wiener gain from a priori SNR (not noisy post_snr)
+        # gain = a_priori_snr / (1 + a_priori_snr)
+        wiener_gain = np.maximum(self.gain_floor, apriori_snr / (1.0 + apriori_snr + self._eps))
+
+        # Temporal gain smoothing
+        if prev_gain is not None and prev_gain.shape == wiener_gain.shape:
+            gain = self.gain_smooth_alpha * prev_gain + (1.0 - self.gain_smooth_alpha) * wiener_gain
+        else:
+            gain = wiener_gain
+
+        y_fft = x_fft * gain
+
+        # IFFT (no synthesis window - single-window COLA approach)
+        y = np.fft.irfft(y_fft, n=frame_len)
+
+        return y, noise_psd, gain, apriori_snr
+
+    def _denoise_channel_with_overlap_add(
+        self,
+        x: np.ndarray,
+        input_buffer: np.ndarray | None,
+        output_buffer: np.ndarray | None,
+        noise_psd: np.ndarray | None,
+        prev_gain: np.ndarray | None = None,
+        prev_apriori_snr: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None]:
+        """
+        Process channel with 50% overlap-add buffering.
+        
+        Returns: (output, new_input_buffer, new_output_buffer, noise_psd, current_gain, current_apriori_snr)
+        """
+        x = np.asarray(x, dtype=np.float64).reshape(-1)
+
+        if x.size == 0:
+            return np.array([], dtype=np.float64), input_buffer, output_buffer, noise_psd, prev_gain, prev_apriori_snr
+
+        # On first call, determine frame size from input
+        if self.hop_size is None:
+            self.hop_size = x.size
+
+        frame_len = 2 * self.hop_size  # Full frame = 2 * hop_size (50% overlap)
+
+        # Initialize buffers on first use
+        if input_buffer is None:
+            input_buffer = np.zeros(self.hop_size, dtype=np.float64)
+            output_buffer = np.zeros(2 * self.hop_size, dtype=np.float64)
+
+        # Create output array
+        output = np.zeros_like(x)
+        current_gain = prev_gain
+        current_apriori_snr = prev_apriori_snr
+
+        # Process in hop_size chunks
+        for i in range(0, x.size, self.hop_size):
+            # Get next chunk (may be smaller on last iteration)
+            chunk = x[i:i + self.hop_size]
+            chunk_len = len(chunk)
+
+            # Concatenate with buffered samples: [buffered_half | new_chunk]
+            if chunk_len == self.hop_size:
+                frame = np.concatenate([input_buffer, chunk])
+            else:
+                # Last chunk: pad with zeros
+                chunk_padded = np.concatenate([chunk, np.zeros(self.hop_size - chunk_len)])
+                frame = np.concatenate([input_buffer, chunk_padded])
+
+            # Process frame
+            y_windowed, noise_psd, current_gain, current_apriori_snr = self._process_frame(
+                frame, noise_psd, prev_gain=current_gain, prev_apriori_snr=current_apriori_snr
+            )
+
+            # Overlap-add: add previous output buffer's second half
+            y_windowed[:self.hop_size] += output_buffer[self.hop_size:]
+
+            # Store new output buffer for next iteration
+            output_buffer = y_windowed.copy()
+
+            # Extract and store output (first hop_size samples)
+            out_chunk = y_windowed[:chunk_len]
+            output[i:i + chunk_len] = out_chunk
+
+            # Update input buffer with new chunk for next iteration
+            input_buffer = chunk if chunk_len == self.hop_size else np.zeros(self.hop_size)
+
+        return output, input_buffer, output_buffer, noise_psd, current_gain, current_apriori_snr
 
     def apply(self, data: np.ndarray) -> np.ndarray:
+        """
+        Apply Wiener denoising with 50% overlap-add and decision-directed a priori SNR.
+        
+        :param data: Audio array, shape (samples,) for mono or (samples, channels) for multi-channel.
+        :return: Denoised audio array with same shape as input.
+        """
         import time
         start_time = time.perf_counter()
-        
+
         arr = np.asarray(data, dtype=np.float64)
+
         if arr.ndim == 1:
-            y, self._noise_psd_1d, self._prev_gain_1d, self._prev_power_1d = self._denoise_channel(
-                arr, self._noise_psd_1d, self._prev_gain_1d, self._prev_power_1d
-            )
+            # Mono processing
+            y, self._input_buffer_1d, self._output_buffer_1d, self._noise_psd_1d, self._prev_gain_1d, self._prev_apriori_snr_1d = \
+                self._denoise_channel_with_overlap_add(
+                    arr, self._input_buffer_1d, self._output_buffer_1d, self._noise_psd_1d,
+                    prev_gain=self._prev_gain_1d, prev_apriori_snr=self._prev_apriori_snr_1d
+                )
             self.last_process_time_ms = (time.perf_counter() - start_time) * 1000.0
             return y
 
-        if arr.ndim == 2:
+        elif arr.ndim == 2:
+            # Multi-channel processing
             n_ch = arr.shape[1]
-            if self._noise_psd_2d is None or len(self._noise_psd_2d) != n_ch:
+
+            if self._input_buffer_2d is None:
+                self._input_buffer_2d = [None] * n_ch
+                self._output_buffer_2d = [None] * n_ch
                 self._noise_psd_2d = [None] * n_ch
                 self._prev_gain_2d = [None] * n_ch
-                self._prev_power_2d = [None] * n_ch
+                self._prev_apriori_snr_2d = [None] * n_ch
 
             out = np.empty_like(arr, dtype=np.float64)
             for ch in range(n_ch):
-                y, self._noise_psd_2d[ch], self._prev_gain_2d[ch], self._prev_power_2d[ch] = self._denoise_channel(
-                    arr[:, ch], self._noise_psd_2d[ch], self._prev_gain_2d[ch], self._prev_power_2d[ch]
-                )
+                y, self._input_buffer_2d[ch], self._output_buffer_2d[ch], self._noise_psd_2d[ch], self._prev_gain_2d[ch], self._prev_apriori_snr_2d[ch] = \
+                    self._denoise_channel_with_overlap_add(
+                        arr[:, ch], self._input_buffer_2d[ch], self._output_buffer_2d[ch], self._noise_psd_2d[ch],
+                        prev_gain=self._prev_gain_2d[ch], prev_apriori_snr=self._prev_apriori_snr_2d[ch]
+                    )
                 out[:, ch] = y
+
             self.last_process_time_ms = (time.perf_counter() - start_time) * 1000.0
             return out
 
-        self.last_process_time_ms = (time.perf_counter() - start_time) * 1000.0
-        raise ValueError("WienerFilter input must be 1D or 2D with shape (samples, channels)")
+        else:
+            raise ValueError("WienerFilter input must be 1D or 2D with shape (samples, channels)")
     
     
 class KalmanFilter(Filter):

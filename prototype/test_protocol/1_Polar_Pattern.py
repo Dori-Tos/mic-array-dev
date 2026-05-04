@@ -316,10 +316,13 @@ def test_polar_pattern(
         
         if geometry == 1:
             num_mics = 4
+            mic_channel_numbers = list(range(int(num_mics)))
         elif geometry == 2:
             num_mics = 8
+            mic_channel_numbers = list(range(int(num_mics)))
         elif geometry == 3:
             num_mics = 10
+            mic_channel_numbers = list(range(int(num_mics)))
         elif geometry == 4:
             num_mics = 4
             mic_channel_numbers = [2, 3, 8, 9] 

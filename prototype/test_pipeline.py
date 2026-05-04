@@ -147,7 +147,7 @@ def _build_mode_components(
         local_search_radius_deg=9.0,
         periodic_full_scan_blocks=20,
     )
-    doa_estimator.freeze(0.0)
+    # doa_estimator.freeze(0.0)
 
     return {
         "mic_list": mic_list,
@@ -237,25 +237,49 @@ if __name__ == "__main__":
     
     # Passband to eliminate low-frequency rumble and high-frequency hiss
     # Spectral Subtraction to supress background noise in voice region
-    filter_rate = sample_rate 
-    filters = [
-        BandPassFilter(
-            logger=filter_logger, 
-            sample_rate=sample_rate, 
-            low_cutoff=300.0, 
-            high_cutoff=4000.0, 
-            order=4),
-        
-        SpectralSubtractionFilter(
-            logger=filter_logger,
-            sample_rate=sample_rate,
-            noise_factor=0.65,              # Moderate noise suppression 
-            gain_floor=0.55,                # Higher floor prevents over-suppression of low freqs (was 0.35)
-            noise_alpha=0.995,              # Very slow noise learning prevents formant suppression
-            noise_update_snr_db=8.0,        # Can now update during low-SNR moments (protected from onset corruption)
-            gain_smooth_alpha=0.92,         # Very strong uniform gain smoothing locks formants, eliminates pops
-        ),
-    ]
+    # Or Wiener filter for more transparent noise reduction (but can cause more artifacts if not carefully tuned)
+    
+    bandPassFilter = BandPassFilter(
+        logger=filter_logger,
+        sample_rate=sample_rate,
+        low_cutoff=300.0,
+        high_cutoff=4000.0,
+        order=4
+    )
+    
+    spectralSubstractionFilter = SpectralSubtractionFilter(
+        logger=filter_logger,
+        sample_rate=sample_rate,
+        noise_factor=0.65,              # Moderate noise suppression 
+        gain_floor=0.55,                # Higher floor prevents over-suppression of low freqs (was 0.35)
+        noise_alpha=0.995,              # Very slow noise learning prevents formant suppression
+        noise_update_snr_db=8.0,        # Can now update during low-SNR moments (protected from onset corruption)
+        gain_smooth_alpha=0.92,         # Very strong uniform gain smoothing locks formants, eliminates pops
+    )
+    
+    wienerFilter = WienerFilter(
+        logger=filter_logger,
+        sample_rate=sample_rate,
+        noise_alpha=0.985,          # Slow noise floor learning (prevents speech corruption)
+        gain_floor=0.08,            # Lower floor suppresses more background noise (-20 dB vs -15.9 dB)
+        gain_smooth_alpha=0.92,     # EXTREME smoothing: locks vowel gains (only 6% new gain per frame)
+        apriori_smooth_alpha=0.99,  # Ultra-strong a priori SNR smoothing (remember 99.5% of previous)
+        noise_update_snr_db=12.0,    # Conservative noise updates
+        noise_update_rms=8e-4,
+    )
+    
+    FILTER = "WIENER"  # "SPECTRAL" or "WIENER"
+    
+    if FILTER == "SPECTRAL":
+        filters = [
+            bandPassFilter,
+            spectralSubstractionFilter
+        ]
+    else:
+        filters = [
+            bandPassFilter,
+            wienerFilter
+        ]
     
     agc = AGCChain(logger=logger, stages=[
         NoiseAwareAdaptiveAmplifier(

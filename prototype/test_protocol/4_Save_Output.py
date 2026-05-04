@@ -32,7 +32,7 @@ from classes.AGC import AdaptiveAmplifier, AGCChain, NoiseAwareAdaptiveAmplifier
 from classes.Array_RealTime import apply_realtime_processing_chain
 from classes.Beamformer import DASBeamformer, MVDRBeamformer
 from classes.DOAEstimator import IterativeDOAEstimator
-from classes.Filter import BandPassFilter, SpectralSubtractionFilter
+from classes.Filter import BandPassFilter, SpectralSubtractionFilter, WienerFilter
 
 
 def _resolve_geometry_path(geometry_value: int) -> Path:
@@ -72,46 +72,79 @@ def _build_pipeline(
 	sample_rate: int,
 	num_mics: int,
 	geometry: int,
+	filter_type: str = "spectral",
+	single_mic: bool = False,
 ):
 	geometry_path = _resolve_geometry_path(int(geometry))
-	mic_channel_numbers = list(range(int(num_mics)))
-	mic_positions = MVDRBeamformer.load_positions_from_xml(str(geometry_path))
+	mic_channel_numbers = [0] if single_mic else list(range(int(num_mics)))
+	mic_positions = None  # Initialize; will be loaded if not in single-mic mode
 
-	das_beamformer = DASBeamformer(
-        logger=logger,
-        mic_channel_numbers=mic_channel_numbers,
-        sample_rate=sample_rate,
-        mic_positions_m=mic_positions,
-	)
+	# Skip beamforming components in single-mic mode
+	if single_mic:
+		beamformer = None
+		doa_estimator = None
+		das_beamformer = None
+	else:
+		mic_positions = MVDRBeamformer.load_positions_from_xml(str(geometry_path))
 
-	beamformer = MVDRBeamformer(
-        logger=logger,
-        mic_channel_numbers=mic_channel_numbers,
-        sample_rate=sample_rate,
-        mic_positions_m=mic_positions,
-        covariance_alpha=0.95,
-        diagonal_loading=0.15,
-        spectral_whitening_factor=0.12,
-        weight_smooth_alpha=0.72,
-        max_adaptive_loading_scale=4.0,
-        coherence_suppression_strength=0.8,
-        weight_smooth_alpha_min=0.45,
-        weight_smooth_alpha_max=0.82,
-        snr_threshold_for_sharpening=2.0,
-        backward_null_strength=0.9,
-	)
- 
- 
-	doa_estimator = IterativeDOAEstimator(
-		logger=logger,
-		update_rate=3.0,
-		angle_range=(-25.0, 25.0),
-		doa_beamformer=das_beamformer,
-		beamformer=beamformer,
-		scan_step_deg=5.0,
-		local_search_radius_deg=10.0,
-		periodic_full_scan_blocks=20,
-	)
+		das_beamformer = DASBeamformer(
+            logger=logger,
+            mic_channel_numbers=mic_channel_numbers,
+            sample_rate=sample_rate,
+            mic_positions_m=mic_positions,
+		)
+
+		beamformer = MVDRBeamformer(
+            logger=logger,
+            mic_channel_numbers=mic_channel_numbers,
+            sample_rate=sample_rate,
+            mic_positions_m=mic_positions,
+            covariance_alpha=0.95,
+            diagonal_loading=0.15,
+            spectral_whitening_factor=0.12,
+            weight_smooth_alpha=0.72,
+            max_adaptive_loading_scale=4.0,
+            coherence_suppression_strength=0.8,
+            weight_smooth_alpha_min=0.45,
+            weight_smooth_alpha_max=0.82,
+            snr_threshold_for_sharpening=2.0,
+            backward_null_strength=0.9,
+		)
+	 
+	 
+		doa_estimator = IterativeDOAEstimator(
+			logger=logger,
+			update_rate=3.0,
+			angle_range=(-25.0, 25.0),
+			doa_beamformer=das_beamformer,
+			beamformer=beamformer,
+			scan_step_deg=5.0,
+			local_search_radius_deg=10.0,
+			periodic_full_scan_blocks=20,
+		)
+
+	# Select filter based on filter_type parameter
+	if filter_type.lower() == "wiener":
+		denoiser = WienerFilter(
+			logger=logger,
+			sample_rate=sample_rate,
+			noise_alpha=0.985,
+			gain_floor=0.10,
+			gain_smooth_alpha=0.92,
+			apriori_smooth_alpha=0.99,
+			noise_update_snr_db=8.0,
+			noise_update_rms=8e-4,
+		)
+	else:  # default to spectral
+		denoiser = SpectralSubtractionFilter(
+			logger=logger,
+			sample_rate=sample_rate,
+			noise_factor=0.65,
+			gain_floor=0.55,
+			noise_alpha=0.995,
+			noise_update_snr_db=8.0,
+			gain_smooth_alpha=0.92,
+		)
 
 	filters = [
 		BandPassFilter(
@@ -121,15 +154,7 @@ def _build_pipeline(
 			high_cutoff=4000.0,
 			order=4,
 		),
-		SpectralSubtractionFilter(
-			logger=logger,
-			sample_rate=sample_rate,
-			noise_factor=0.65,
-			gain_floor=0.55,
-			noise_alpha=0.995,
-			noise_update_snr_db=8.0,
-			gain_smooth_alpha=0.92,
-		)
+		denoiser,
     ]
 
 	agc = AGCChain(logger=logger, stages=[
@@ -175,6 +200,8 @@ def run_save_output(
 	warmup_seconds: float = 2.0,
 	warn_size_mb: float = 512.0,
 	hard_limit_mb: float = 2048.0,
+	filter_type: str = "spectral",
+	single_mic: bool = False,
 ):
 	output_path = Path(output_dir)
 	output_path.mkdir(parents=True, exist_ok=True)
@@ -188,10 +215,13 @@ def run_save_output(
 	device_name = str(device_info["name"])
 	effective_sample_rate = int(sample_rate or int(device_info["default_samplerate"]))
 	max_input_channels = int(device_info.get("max_input_channels", 0))
-	if max_input_channels < int(num_mics):
+	
+	# In single-mic mode, only need 1 input channel; otherwise need all num_mics channels
+	input_channels = 1 if single_mic else int(num_mics)
+	if max_input_channels < input_channels:
 		raise ValueError(
 			f"Selected device supports only {max_input_channels} input channels, "
-			f"but --num-mics requires {num_mics}."
+			f"but requires {input_channels}."
 		)
 
 	logger = logging.getLogger("SaveOutput")
@@ -207,6 +237,8 @@ def run_save_output(
 		sample_rate=effective_sample_rate,
 		num_mics=num_mics,
 		geometry=geometry,
+		filter_type=filter_type,
+		single_mic=single_mic,
 	)
 
 	warn_bytes = int(max(1.0, float(warn_size_mb)) * 1024 * 1024)
@@ -224,7 +256,13 @@ def run_save_output(
 	print(f"  Blocksize: {blocksize} samples")
 	print(f"  Num mics: {num_mics}")
 	print(f"  Geometry: {geometry_path.name}")
-	print("  Pipeline: MVDR + BandPass + SpectralSubtraction(ON) + AGC(ON)")
+	# Display pipeline based on mode
+	if single_mic:
+		filter_name = "WienerFilter" if filter_type.lower() == "wiener" else "SpectralSubtractionFilter"
+		print(f"  Pipeline: SINGLE MIC (NO BEAMFORMING) + BandPass + {filter_name}(ON) + AGC(ON)")
+	else:
+		filter_name = "WienerFilter" if filter_type.lower() == "wiener" else "SpectralSubtractionFilter"
+		print(f"  Pipeline: MVDR + BandPass + {filter_name}(ON) + AGC(ON)")
 	print(f"  Freeze beamformer: {freeze_beamformer}")
 	if freeze_beamformer:
 		print(f"  Freeze angle: {float(freeze_angle_deg):.1f} deg")
@@ -287,7 +325,7 @@ def run_save_output(
 	try:
 		with sd.InputStream(
 			samplerate=effective_sample_rate,
-			channels=int(num_mics),
+			channels=input_channels,
 			device=int(device_index),
 			dtype="float32",
 			blocksize=int(blocksize),
@@ -299,8 +337,13 @@ def run_save_output(
 			while True:
 				block, _overflowed = stream.read(int(blocksize))
 				block = np.asarray(block, dtype=np.float32)
+				
+				# Ensure block is always 2D (samples, channels) for consistent processing
+				if block.ndim == 1:
+					block = block.reshape(-1, 1)
 
-				if not bool(freeze_beamformer):
+				# Only attempt DOA/beamformer updates if they exist (skip in single-mic mode)
+				if not bool(freeze_beamformer) and doa_estimator is not None and beamformer is not None:
 					try:
 						doa = doa_estimator.estimate_doa(block)
 						# Only update steering angle if it actually changed (avoid redundant updates)
@@ -310,7 +353,7 @@ def run_save_output(
 								beamformer.set_steering_angle(float(doa))
 					except Exception as doa_err:
 						logger.warning(f"DOA update warning: {type(doa_err).__name__}: {doa_err}")
-				elif hasattr(beamformer, "set_steering_angle"):
+				elif beamformer is not None and hasattr(beamformer, "set_steering_angle"):
 					current_angle = beamformer.get_steering_angle() if hasattr(beamformer, "get_steering_angle") else None
 					if current_angle is None or not np.isclose(float(freeze_angle_deg), float(current_angle), atol=1e-4):
 						beamformer.set_steering_angle(float(freeze_angle_deg))
@@ -404,6 +447,8 @@ if __name__ == "__main__":
 	parser.add_argument("--warmup-seconds", type=float, default=2.0, help="Warmup time before writing audio")
 	parser.add_argument("--warn-size-mb", type=float, default=512.0, help="Warn when output size exceeds this MB")
 	parser.add_argument("--hard-limit-mb", type=float, default=2048.0, help="Abort without saving when output exceeds this MB")
+	parser.add_argument("--filter", type=str, default="spectral", choices=["spectral", "wiener"], help="Denoiser filter: spectral (SpectralSubtractionFilter) or wiener (WienerFilter) (default: spectral)")
+	parser.add_argument("--single-mic", action=argparse.BooleanOptionalAction, default=False, help="Use only the first microphone (no beamforming/DOA)")
 
 	args = parser.parse_args()
 
@@ -421,4 +466,6 @@ if __name__ == "__main__":
 		warmup_seconds=args.warmup_seconds,
 		warn_size_mb=args.warn_size_mb,
 		hard_limit_mb=args.hard_limit_mb,
+		filter_type=args.filter,
+		single_mic=args.single_mic,
 	)
