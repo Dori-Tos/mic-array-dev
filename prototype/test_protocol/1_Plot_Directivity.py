@@ -4,6 +4,12 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator, MultipleLocator, FormatStrFormatter
 from pathlib import Path
 import argparse
+from typing import Any
+
+
+def _close_loop(series: pd.Series) -> np.ndarray:
+    values = series.to_numpy(dtype=float)
+    return np.concatenate((values, np.array([float(values[0])], dtype=float)))
 
 
 def plot_directivity(
@@ -15,6 +21,7 @@ def plot_directivity(
     quarter_graph=False,
     half_rotation=False,
     side=False,
+    source="rms",
 ):
     """
     Plot directivity pattern from measurement data.
@@ -37,9 +44,19 @@ def plot_directivity(
         side: If True with --half-rotation, apply side pattern mode (0-180°).
               Data is mirrored left-right (around vertical axis) to create full circle.
               If False with --half-rotation, apply front pattern mode (-90 to 90°, no mirroring).
+        source: Which values to plot for the main directivity curve: "rms" uses the
+                smoothed RMS-derived values, "gain" uses the unedited gain_db column.
     """
     # Load data
     df = pd.read_csv(csv_file)
+    source = source.lower().strip()
+    if source not in ("rms", "gain"):
+        raise ValueError("source must be either 'rms' or 'gain'")
+
+    main_value_column = "rms_dbfs" if source == "rms" else "gain_db"
+    main_value_label = "RMS Level (dBFS)" if source == "rms" else "Unedited Gain (dB)"
+    plot_name_suffix = "_unedited" if source == "gain" else ""
+    title_suffix = "(Unedited)" if source == "gain" else ""
     
     # Determine reference value for dB calculation
     min_level = 1e-10
@@ -54,14 +71,11 @@ def plot_directivity(
     
     # Recalculate dB values using the reference
     df['rms_dbfs'] = 20 * np.log10(np.maximum(df['rms_level'], min_level) / ref_value)
-    if 'peak_dbfs' in df.columns:
-        df['peak_dbfs'] = 20 * np.log10(np.maximum(df['peak_level'], min_level) / ref_value)
-    
+    if main_value_column not in df.columns:
+        raise ValueError(f"source='{source}' requires column '{main_value_column}' in the CSV")
+
     # Detect CSV structure
     has_doa_angle = 'doa_angle' in df.columns
-    has_reference_rms = 'reference_rms_used' in df.columns
-    has_peak_dbfs = 'peak_dbfs' in df.columns
-    
     # Check if relative_angle is available (when beamformer is locked)
     use_relative_angle = 'relative_angle' in df.columns and df['relative_angle'].notna().any()
     angle_column = 'relative_angle' if use_relative_angle else 'expected_angle'
@@ -108,264 +122,71 @@ def plot_directivity(
         theta_ticks = np.arange(0, 360, 45)
 
     # Build integer-only dB ticks to remove decimal labels like 0.0, -2.5, ...
-    data_min_db = float(np.floor(df['rms_dbfs'].min()))
-    if has_peak_dbfs:
-        data_min_db = float(np.floor(min(data_min_db, df['peak_dbfs'].min())))
+    data_min_db = float(np.floor(df[main_value_column].min()))
     if min_scale is not None:
         data_min_db = float(np.floor(min_scale))
     db_floor = int(5 * np.floor(data_min_db / 5.0))
     db_ticks = np.arange(db_floor, 1, 5)
-    
-    # Check for peaks - ReSpeaker uses 'peaks' column
-    peaks_available = 'peaks' in df.columns and df['peaks'].any()
     
     # Get reference RMS info for title
     reference_info = ""
     ref_rms = ref_value
     ref_dbv = 20 * np.log10(ref_rms)
     reference_info = f"\nReference ({ref_source}): {ref_rms:.6f} RMS ({ref_dbv:.1f} dB)"
-    
-    # Use multi-plot layout only for ReSpeaker with peaks
-    if peaks_available and has_doa_angle:
-        print("Peak measurements detected in data. Plotting both RMS and Peak levels.")
+    # Build the single directivity plot using the selected source values only.
+    fig = plt.figure(figsize=(8, 6))
+    ax1: Any = plt.subplot(111, projection='polar')
 
-        # Create figure with polar plot
-        fig = plt.figure(figsize=(12, 10))
-
-        # Main polar plot for RMS level
-        ax1 = plt.subplot(221, projection='polar')
-        
-        if quarter_graph or half_rotation:
-            angles_plot = df[angle_column].values
-            rms_plot = df['rms_dbfs'].values
-        else:
-            # Close the loop for full-circle plots
-            angles_plot = np.append(df[angle_column].values, df[angle_column].iloc[0])
-            rms_plot = np.append(df['rms_dbfs'].values, df['rms_dbfs'].iloc[0])
-        angles_rad = np.deg2rad(angles_plot)
-        
-        ax1.plot(angles_rad, rms_plot, 'b-o', linewidth=2, markersize=4, label='RMS')
-        ax1.set_theta_zero_location('N')
-        ax1.set_theta_direction(-1)
-        ax1.set_thetagrids(theta_ticks)
-        if quarter_graph:
-            ax1.set_thetamin(-90)
-            ax1.set_thetamax(90)
-        elif half_rotation and not side:
-            ax1.set_thetamin(-90)
-            ax1.set_thetamax(90)
-        ax1.set_title('RMS Level (dBFS)', pad=20, fontsize=12, fontweight='bold')
-        ax1.grid(True)
-        ax1.legend(loc='upper right')
-        if min_scale is not None:
-            ax1.set_ylim([min_scale, 0])
-        ax1.set_yticks(db_ticks)
-        ax1.yaxis.set_major_formatter(FormatStrFormatter('%d'))
-
-        # Polar plot for Peak level
-        ax2 = plt.subplot(222, projection='polar')
-        
-        if quarter_graph or half_rotation:
-            peak_plot = df['peak_dbfs'].values
-        else:
-            # Close the loop for full-circle plots
-            peak_plot = np.append(df['peak_dbfs'].values, df['peak_dbfs'].iloc[0])
-        
-        ax2.plot(angles_rad, peak_plot, 'r-s', linewidth=2, markersize=4, label='Peak')
-        ax2.set_theta_zero_location('N')
-        ax2.set_theta_direction(-1)
-        ax2.set_thetagrids(theta_ticks)
-        if quarter_graph:
-            ax2.set_thetamin(-90)
-            ax2.set_thetamax(90)
-        elif half_rotation and not side:
-            ax2.set_thetamin(-90)
-            ax2.set_thetamax(90)
-        ax2.set_title('Peak Level (dBFS)', pad=20, fontsize=12, fontweight='bold')
-        ax2.grid(True)
-        ax2.legend(loc='upper right')
-        if min_scale is not None:
-            ax2.set_ylim([min_scale, 0])
-        ax2.set_yticks(db_ticks)
-        ax2.yaxis.set_major_formatter(FormatStrFormatter('%d'))
-
-        # Cartesian plot comparing RMS and Peak
-        ax3 = plt.subplot(223)
-        ax3.plot(df[angle_column], df['rms_dbfs'], 'b-o', linewidth=2, markersize=4, label='RMS')
-        ax3.plot(df[angle_column], df['peak_dbfs'], 'r-s', linewidth=2, markersize=4, label='Peak')
-        ax3.set_xlabel(f'{angle_label} (degrees)', fontsize=10)
-        ax3.set_ylabel('Level (dBFS)', fontsize=10)
-        ax3.set_title('Signal Levels vs Angle', fontsize=12, fontweight='bold')
-        ax3.grid(True, alpha=0.3)
-        ax3.legend()
-        if quarter_graph:
-            xlim = [-90, 90]
-            x_interval = 30
-        elif half_rotation:
-            xlim = [0, 180] if side else [-90, 90]
-            x_interval = 30
-        else:
-            xlim = [0, 360]
-            x_interval = 45
-        ax3.set_xlim(xlim)
-        ax3.xaxis.set_major_locator(MultipleLocator(x_interval))
-        ax3.yaxis.set_major_locator(MaxNLocator(integer=True))
-        ax3.yaxis.set_major_formatter(FormatStrFormatter('%d'))
-        if min_scale is not None:
-            ax3.set_ylim([min_scale, 0])
-
-        # DOA angle plot (or relative angle plot if beamformer is locked)
-        ax4 = plt.subplot(224)
-        if use_relative_angle:
-            ax4.plot(df[angle_column], df['rms_dbfs'], 'b-o', linewidth=2, markersize=4)
-            ax4.set_xlabel(f'{angle_label} (degrees)', fontsize=10)
-            ax4.set_ylabel('RMS Level (dBFS)', fontsize=10)
-            ax4.set_title('Directivity Pattern (Relative to Locked DOA)', fontsize=12, fontweight='bold')
-            ax4.grid(True, alpha=0.3)
-            if quarter_graph:
-                xlim = [-90, 90]
-                x_interval = 30
-            elif half_rotation:
-                xlim = [0, 180] if side else [-90, 90]
-                x_interval = 30
-            else:
-                xlim = [0, 360]
-                x_interval = 45
-            ax4.set_xlim(xlim)
-            ax4.xaxis.set_major_locator(MultipleLocator(x_interval))
-            ax4.yaxis.set_major_locator(MaxNLocator(integer=True))
-            ax4.yaxis.set_major_formatter(FormatStrFormatter('%d'))
-            if min_scale is not None:
-                ax4.set_ylim([min_scale, 0])
-        elif has_doa_angle:
-            ax4.plot(df['expected_angle'], df['doa_angle'], 'g-^', linewidth=2, markersize=4)
-            ax4.set_xlabel('Expected Angle (degrees)', fontsize=10)
-            ax4.set_ylabel('Detected DOA Angle (degrees)', fontsize=10)
-            ax4.set_title('Direction of Arrival Detection', fontsize=12, fontweight='bold')
-            ax4.grid(True, alpha=0.3)
-            if quarter_graph:
-                xlim = [-90, 90]
-                ylim = [-90, 90]
-                x_interval = 30
-            elif half_rotation:
-                xlim = [0, 180] if side else [-90, 90]
-                ylim = [0, 180] if side else [-90, 90]
-                x_interval = 30
-            else:
-                xlim = [0, 360]
-                ylim = [0, 360]
-                x_interval = 45
-            ax4.set_xlim(xlim)
-            ax4.set_ylim(ylim)
-            ax4.xaxis.set_major_locator(MultipleLocator(x_interval))
-            ax4.yaxis.set_major_locator(MaxNLocator(integer=True))
-            ax4.yaxis.set_major_formatter(FormatStrFormatter('%d'))
-        else:
-            # For standard mic, show cartesian plot instead
-            ax4.plot(df[angle_column], df['rms_dbfs'], 'b-o', linewidth=2, markersize=4)
-            ax4.set_xlabel(f'{angle_label} (degrees)', fontsize=10)
-            ax4.set_ylabel('RMS Level (dB)', fontsize=10)
-            ax4.set_title('Directivity Pattern', fontsize=12, fontweight='bold')
-            ax4.grid(True, alpha=0.3)
-            if quarter_graph:
-                xlim = [-90, 90]
-                x_interval = 30
-            elif half_rotation:
-                xlim = [0, 180] if side else [-90, 90]
-                x_interval = 30
-            else:
-                xlim = [0, 360]
-                x_interval = 45
-            ax4.set_xlim(xlim)
-            ax4.xaxis.set_major_locator(MultipleLocator(x_interval))
-            ax4.yaxis.set_major_locator(MaxNLocator(integer=True))
-            ax4.yaxis.set_major_formatter(FormatStrFormatter('%d'))
-            if min_scale is not None:
-                ax4.set_ylim([min_scale, 0])
-
-        # Add overall title with metadata
-        test_name = Path(csv_file).stem
-        device_type = 'ReSpeaker' if has_doa_angle else 'Microphone'
-        fig.suptitle(f'{device_type} Directivity Pattern - {test_name}{reference_info}', 
-                     fontsize=14, fontweight='bold', y=0.98)
-
-        plt.tight_layout(rect=[0, 0, 1, 0.96])
-
-        # Save plot
-        if save_plot:
-            if save_location:
-                save_dir = Path(save_location)
-                # If save_location is a file, use its parent directory instead
-                if save_dir.is_file() or str(save_dir).endswith('.csv'):
-                    save_dir = save_dir.parent
-                save_dir.mkdir(parents=True, exist_ok=True)
-                output_file = save_dir / f"{test_name}.png"
-            else:
-                output_file = Path(csv_file).with_suffix('.png')
-            plt.savefig(output_file, dpi=300, bbox_inches='tight')
-            print(f"Plot saved to: {output_file}")
-
-        plt.show()
-        
+    if quarter_graph or half_rotation:
+        angles_plot = df[angle_column].to_numpy(dtype=float)
+        value_plot = df[main_value_column].to_numpy(dtype=float)
     else:
-        print("Peak measurements not available in data. Plotting RMS only.")
-        
-        # Create figure with single polar plot for RMS level
-        fig = plt.figure(figsize=(8, 6))
-        ax1 = plt.subplot(111, projection='polar')
-        
-        if quarter_graph or half_rotation:
-            angles_plot = df[angle_column].values
-            rms_plot = df['rms_dbfs'].values
+        angles_plot = _close_loop(df[angle_column])
+        value_plot = _close_loop(df[main_value_column])
+    angles_rad = np.deg2rad(angles_plot)
+
+    ax1.plot(angles_rad, value_plot, 'b-o', linewidth=2, markersize=4)
+    ax1.set_theta_zero_location('N')
+    ax1.set_theta_direction(-1)
+    ax1.set_thetagrids(theta_ticks)
+    if quarter_graph:
+        ax1.set_thetamin(-90)
+        ax1.set_thetamax(90)
+    elif half_rotation and not side:
+        ax1.set_thetamin(-90)
+        ax1.set_thetamax(90)
+    title = main_value_label
+    if use_relative_angle:
+        title += ' - Relative to Locked DOA'
+    ax1.set_title(title, pad=20, fontsize=12, fontweight='bold')
+    ax1.grid(True)
+    if min_scale is not None:
+        ax1.set_ylim((min_scale, 0))
+    ax1.set_yticks(db_ticks)
+    ax1.yaxis.set_major_formatter(FormatStrFormatter('%d'))
+
+    # Add overall title with metadata
+    test_name = Path(csv_file).stem + plot_name_suffix
+    device_type = 'ReSpeaker' if has_doa_angle else 'Microphone'
+    fig.suptitle(f'{device_type} Directivity Pattern - {test_name}{title_suffix}{reference_info}',
+                 fontsize=14, fontweight='bold', y=0.98)
+
+    plt.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
+
+    # Save plot
+    if save_plot:
+        if save_location:
+            save_dir = Path(save_location)
+            if save_dir.is_file() or str(save_dir).endswith('.csv'):
+                save_dir = save_dir.parent
+            save_dir.mkdir(parents=True, exist_ok=True)
+            output_file = save_dir / f"{test_name}.png"
         else:
-            # Close the loop for full-circle plots
-            angles_plot = np.append(df[angle_column].values, df[angle_column].iloc[0])
-            rms_plot = np.append(df['rms_dbfs'].values, df['rms_dbfs'].iloc[0])
-        angles_rad = np.deg2rad(angles_plot)
-        
-        ax1.plot(angles_rad, rms_plot, 'b-o', linewidth=2, markersize=4)
-        ax1.set_theta_zero_location('N')
-        ax1.set_theta_direction(-1)
-        ax1.set_thetagrids(theta_ticks)
-        if quarter_graph:
-            ax1.set_thetamin(-90)
-            ax1.set_thetamax(90)
-        elif half_rotation and not side:
-            ax1.set_thetamin(-90)
-            ax1.set_thetamax(90)
-        title = 'RMS Level (dBFS)'
-        if use_relative_angle:
-            title += ' - Relative to Locked DOA'
-        ax1.set_title(title, pad=20, fontsize=12, fontweight='bold')
-        ax1.grid(True)
-        if min_scale is not None:
-            ax1.set_ylim([min_scale, 0])
-        ax1.set_yticks(db_ticks)
-        ax1.yaxis.set_major_formatter(FormatStrFormatter('%d'))
+            output_file = Path(csv_file).with_name(f"{Path(csv_file).stem}{plot_name_suffix}.png")
+        plt.savefig(output_file, dpi=300, bbox_inches='tight')
+        print(f"Plot saved to: {output_file}")
 
-        # Add overall title with metadata
-        test_name = Path(csv_file).stem
-        device_type = 'ReSpeaker' if has_doa_angle else 'Microphone'
-        fig.suptitle(f'{device_type} Directivity Pattern - {test_name}{reference_info}', 
-                     fontsize=14, fontweight='bold', y=0.98)
-
-        plt.tight_layout(rect=[0, 0, 1, 0.96])
-
-        # Save plot
-        if save_plot:
-            if save_location:
-                save_dir = Path(save_location)
-                # If save_location is a file, use its parent directory instead
-                if save_dir.is_file() or str(save_dir).endswith('.csv'):
-                    save_dir = save_dir.parent
-                save_dir.mkdir(parents=True, exist_ok=True)
-                output_file = save_dir / f"{test_name}.png"
-            else:
-                output_file = Path(csv_file).with_suffix('.png')
-            plt.savefig(output_file, dpi=300, bbox_inches='tight')
-            print(f"Plot saved to: {output_file}")
-
-        plt.show()
+    plt.show()
 
     # Print statistics
     print("\n" + "="*60)
@@ -377,18 +198,12 @@ def plot_directivity(
     print(f"Reference RMS ({ref_source}): {ref_value:.6f} ({ref_dbv:.1f} dB)")
     print()
     
-    db_unit = "dBFS" if has_doa_angle else "dB"
-    print(f"RMS Level:")
-    print(f"  Mean:   {df['rms_dbfs'].mean():.2f} {db_unit}")
-    print(f"  Min:    {df['rms_dbfs'].min():.2f} {db_unit} at {df.loc[df['rms_dbfs'].idxmin(), angle_column]:.1f}°")
-    print(f"  Max:    {df['rms_dbfs'].max():.2f} {db_unit} at {df.loc[df['rms_dbfs'].idxmax(), angle_column]:.1f}°")
-    print(f"  Range:  {df['rms_dbfs'].max() - df['rms_dbfs'].min():.2f} dB")
-    if peaks_available:
-        print(f"\nPeak Level:")
-        print(f"  Mean:   {df['peak_dbfs'].mean():.2f} {db_unit}")
-        print(f"  Min:    {df['peak_dbfs'].min():.2f} {db_unit} at {df.loc[df['peak_dbfs'].idxmin(), angle_column]:.1f}°")
-        print(f"  Max:    {df['peak_dbfs'].max():.2f} {db_unit} at {df.loc[df['peak_dbfs'].idxmax(), angle_column]:.1f}°")
-        print(f"  Range:  {df['peak_dbfs'].max() - df['peak_dbfs'].min():.2f} dB")
+    db_unit = "dBFS" if source == "rms" else "dB"
+    print(f"{main_value_label}:")
+    print(f"  Mean:   {df[main_value_column].mean():.2f} {db_unit}")
+    print(f"  Min:    {df[main_value_column].min():.2f} {db_unit} at {df.loc[df[main_value_column].idxmin(), angle_column]:.1f}°")
+    print(f"  Max:    {df[main_value_column].max():.2f} {db_unit} at {df.loc[df[main_value_column].idxmax(), angle_column]:.1f}°")
+    print(f"  Range:  {df[main_value_column].max() - df[main_value_column].min():.2f} dB")
     if use_relative_angle and 'locked_doa' in df.columns:
         print(f"\nBeamformer locked at: {df['locked_doa'].iloc[0]:.0f}°")
     print("="*60)
@@ -399,6 +214,8 @@ if __name__ == '__main__':
     parser.add_argument('csv_file', type=str, help='Path to CSV file with measurements')
     parser.add_argument('--no-save', action='store_true', help='Do not save plot to file')
     parser.add_argument('--save-location', type=str, default=None, help='Optional directory to save plot (default: same directory as CSV file)')
+    parser.add_argument('--source', choices=('rms', 'gain'), default='rms',
+                        help='Choose which values to plot: rms uses the smoothed RMS-derived values, gain uses the unedited gain_db')
     parser.add_argument('--reference-max-rms', type=float, default=None,
                         help='External reference max RMS value for normalizing dB (allows comparing multiple measurements)')
     parser.add_argument('--min-scale', type=float, default=None,
@@ -421,6 +238,7 @@ if __name__ == '__main__':
         quarter_graph=args.quarter_graph,
         half_rotation=args.half_rotation,
         side=args.side,
+        source=args.source,
     )
 
     

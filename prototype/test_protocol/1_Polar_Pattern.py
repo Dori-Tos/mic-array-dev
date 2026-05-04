@@ -115,6 +115,7 @@ def test_polar_pattern(
     process_block_ms=20.0,
     num_mics=8,
     geometry=2,
+    gain_input_reference='mean',
 ):
     """
     Measure microphone array polar pattern using the complete processing pipeline.
@@ -161,6 +162,10 @@ def test_polar_pattern(
         num_mics: Number of microphones to use for beamforming (default: 8).
         geometry: Geometry selector using XML filename prefix before '_'.
               Example: geometry=2 selects files like '2_*.xml'.
+          gain_input_reference: Input reference used for gain denominator.
+              'mean' (default) uses RMS mean across captured channels,
+              'median' uses RMS median across channels,
+              'ch0' preserves legacy first-channel behavior.
     
     Returns:
         DataFrame with averaged measurements
@@ -190,6 +195,10 @@ def test_polar_pattern(
         device_name = device_info['name']
     
     sample_rate = int(device_info['default_samplerate'])
+
+    gain_input_reference = str(gain_input_reference).strip().lower()
+    if gain_input_reference not in {'mean', 'median', 'ch0'}:
+        raise ValueError("gain_input_reference must be one of: 'mean', 'median', 'ch0'")
     
     # In pipeline mode, capture one channel per configured microphone.
     num_channels = int(num_mics) if use_pipeline else 1
@@ -214,6 +223,7 @@ def test_polar_pattern(
     print(f"  Audio device: {device_name} (index {device_index})")
     print(f"  Sample rate: {sample_rate} Hz")
     print(f"  Channels: {num_channels} (array-based beamforming)")
+    print(f"  Gain input reference: {gain_input_reference}")
     print(f"  Number of passes: {num_passes}")
     if quarter_rotation:
         range_desc = '(FRONT ONLY - 90°, will be mirrored)'
@@ -442,6 +452,30 @@ def test_polar_pattern(
             return np.zeros(0, dtype=np.float32)
 
         return np.concatenate(out_chunks)
+
+    def _compute_input_reference_levels(audio_block: np.ndarray) -> tuple[float, float]:
+        """Compute input reference levels used by gain, with configurable channel reduction."""
+        data = np.asarray(audio_block, dtype=np.float32)
+        if data.ndim == 1:
+            data = data.reshape(-1, 1)
+        elif data.ndim != 2:
+            data = data.reshape(-1, 1)
+
+        if data.size == 0 or data.shape[1] == 0:
+            return 0.0, 0.0
+
+        if gain_input_reference == 'ch0':
+            ref = data[:, 0]
+            ref_rms = float(np.sqrt(np.mean(ref ** 2))) if ref.size else 0.0
+            ref_peak = float(np.max(np.abs(ref))) if ref.size else 0.0
+            return ref_rms, ref_peak
+
+        per_channel_rms = np.sqrt(np.mean(data ** 2, axis=0))
+        per_channel_peak = np.max(np.abs(data), axis=0)
+        reducer = np.mean if gain_input_reference == 'mean' else np.median
+        ref_rms = float(reducer(per_channel_rms)) if per_channel_rms.size else 0.0
+        ref_peak = float(reducer(per_channel_peak)) if per_channel_peak.size else 0.0
+        return ref_rms, ref_peak
     
     # Storage for all measurements across all passes
     all_measurements = []
@@ -589,10 +623,8 @@ def test_polar_pattern(
                         if max_val > 1.0:
                             audio_data = audio_data / max_val
 
-                        # Input reference metrics (first mic channel) to compute gain drift.
-                        raw_mono = audio_data[:, 0] if audio_data.ndim == 2 and audio_data.shape[1] > 0 else audio_data.reshape(-1)
-                        input_rms_level = float(np.sqrt(np.mean(raw_mono ** 2))) if raw_mono.size else 0.0
-                        input_peak_level = float(np.max(np.abs(raw_mono))) if raw_mono.size else 0.0
+                        # Input reference metrics used by gain computation.
+                        input_rms_level, input_peak_level = _compute_input_reference_levels(audio_data)
 
                         # Apply processing pipeline (filters retain learned state from settling phase)
                         if use_pipeline:
@@ -625,6 +657,7 @@ def test_polar_pattern(
                             # Input levels
                             'input_rms_level': input_rms_level,
                             'input_peak_level': input_peak_level,
+                            'input_reference_mode': gain_input_reference,
                             'rms_level': rms_level,
                             'peak_level': peak_level,
                         }
@@ -728,6 +761,7 @@ def test_polar_pattern(
         'rms_dbfs': 'mean',
         'peak_level': 'mean',
         'peak_dbfs': 'mean',
+        'input_reference_mode': 'first',
         'reference_angle': 'first',
         'pass_number': 'count'
     })
@@ -831,6 +865,14 @@ if __name__ == '__main__':
                         help='Number of microphones to use (default: 10)')
     parser.add_argument('--geometry', type=int, default=2,
                         help="Geometry selector by XML filename prefix (default: 1). Example: --geometry 2 loads '2_*.xml'.")
+    parser.add_argument('--gain-input-reference', type=str, default='mean',
+                        choices=['mean', 'median', 'ch0'],
+                        help=(
+                            "Input reference used to compute gain denominator: "
+                            "'mean' (default) uses RMS mean across all channels, "
+                            "'median' uses RMS median across channels, "
+                            "'ch0' preserves legacy first-channel behavior."
+                        ))
     
     args = parser.parse_args()
     
@@ -875,6 +917,7 @@ if __name__ == '__main__':
         process_block_ms=args.process_block_ms,
         num_mics=args.num_mics,
         geometry=args.geometry,
+        gain_input_reference=args.gain_input_reference,
     )
     
     # Usage examples:
