@@ -28,7 +28,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-BASE_PATH = Path("Python/Tests/mic-array-dev/data/test_protocol/1_polar_pattern/3_rim_70dB")
+BASE_PATH = Path("Python/Tests/mic-array-dev/data/test_protocol/1_polar_pattern/4_single_corner_70dB")
 
 DEFAULT_FILES = [
     # Edit this list to include the CSVs to use for the frequency response plot.
@@ -193,6 +193,7 @@ def plot_frequency_response(
     extrapolate_angle: bool = False,
     use_rms_level_only: bool = False,
     rms_reference: str = "input",
+    ylim: Tuple[float, float] | None = None,
 ) -> None:
     if not target_angles_deg:
         target_angles_deg = [0.0]
@@ -258,7 +259,9 @@ def plot_frequency_response(
             plt.ylim(ymin - spread, ymax + spread)
     else:
         plt.ylim(-20, 20)
-                
+    if ylim is not None:
+        plt.ylim(*ylim)
+
     plt.tight_layout()
 
     if output is not None:
@@ -289,6 +292,8 @@ def main() -> None:
                         help="Directory to save output image (if omitted the plot is shown)")
     parser.add_argument("--name", type=str, default="frequency_response.png",
                         help="Filename to use when saving the plot")
+    parser.add_argument("--ylim", nargs=2, type=float, default=None,
+                        help="Optional y-axis limits as two floats: ymin ymax (e.g. --ylim -20 20)")
     args = parser.parse_args()
 
     REAL_PATH_FILES = [BASE_PATH / f for f in DEFAULT_FILES]
@@ -311,6 +316,7 @@ def main() -> None:
         extrapolate_angle=args.extrapolate_angle,
         use_rms_level_only=args.use_rms_level_only,
         rms_reference=args.rms_reference,
+        ylim=tuple(args.ylim) if args.ylim else None,
     )
 
 
