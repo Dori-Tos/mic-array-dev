@@ -99,6 +99,10 @@ def apply_realtime_processing_chain(
         return processed, timing
     return processed
 
+
+def _ms_to_samples(sample_rate: int, duration_ms: float) -> int:
+    return int(max(1, round((float(sample_rate) * float(duration_ms)) / 1000.0)))
+
 class Array_RealTime(Array):    
     """
     Real-time audio processing array class that extends the base Array with real-time capabilities.
@@ -109,6 +113,10 @@ class Array_RealTime(Array):
         (e.g., 16000 Hz) to reduce computational load. The original sample rate is restored after processing.
     :param initial_silence_duration: Duration in seconds to silence output at startup while filters adapt (default: 2.0).
         Set to 0 to disable. Filters often need 1-3 seconds to stabilize before sound quality is good.
+    :param post_beamforming_block_ms: Optional smaller block size, in milliseconds, used after beamforming.
+        The value must cleanly divide the beamforming block duration and must be at least 5 ms.
+        Example: if the beamforming block is 20 ms, valid values are 10 ms and 5 ms.
+    :param post_beamforming_min_block_ms: Minimum allowed post-beamforming block size in milliseconds.
     """ 
     
     def __init__(self, *args, 
@@ -117,6 +125,8 @@ class Array_RealTime(Array):
             output_mode: str = "local",
             output_boundary_fade_ms: float = 8.0,
             downsample_rate: int | None = None, 
+            post_beamforming_block_ms: float | None = None,
+            post_beamforming_min_block_ms: float = 5.0,
             initial_silence_duration: float = 2.0, **kwargs
         ):
         
@@ -132,6 +142,13 @@ class Array_RealTime(Array):
             raise ValueError("output_mode must be 'local' or 'codec'")
         self.downsample_rate = downsample_rate  # Downsample to this rate (e.g., 16000 Hz)
         self.initial_silence_duration = float(initial_silence_duration)  # Silence duration (sec) at startup
+        self.post_beamforming_block_ms = None if post_beamforming_block_ms is None else float(post_beamforming_block_ms)
+        self.post_beamforming_min_block_ms = float(post_beamforming_min_block_ms)
+        if self.post_beamforming_block_ms is not None:
+            if self.post_beamforming_block_ms <= 0:
+                raise ValueError("post_beamforming_block_ms must be > 0")
+        if self.post_beamforming_min_block_ms <= 0:
+            raise ValueError("post_beamforming_min_block_ms must be > 0")
         self._stream_start_time = None  # Track when audio stream started
         self._codec_stream_active = False
         self._output_playback_rate = self.sampling_rate
@@ -188,6 +205,11 @@ class Array_RealTime(Array):
         self._processing_stop_event = threading.Event()
         self._processing_input_channel = 0
         self._last_input_blocksize = 0
+        self._post_block_validation_state = {
+            "validated": False,
+            "samples": None,
+            "rate": None,
+        }
 
         # Measurement tracking for side-door data extraction (no buffering).
         self._measurement_active = False
@@ -409,6 +431,75 @@ class Array_RealTime(Array):
         ch = int(self._processing_input_channel)
         ch = max(0, min(ch, block.shape[1] - 1))
         return np.asarray(block[:, ch], dtype=np.float32).reshape(-1)
+
+    def _resolve_post_beamforming_block_samples(self, block_sample_count: int, sample_rate: int) -> int:
+        """Resolve and validate the smaller post-beamforming block size in samples."""
+        target_ms = self.post_beamforming_block_ms
+        if target_ms is None:
+            return int(block_sample_count)
+
+        min_ms = float(self.post_beamforming_min_block_ms)
+        if target_ms < min_ms:
+            raise ValueError(
+                f"post_beamforming_block_ms must be >= {min_ms:g} ms, got {target_ms:g} ms"
+            )
+
+        block_ms = (float(block_sample_count) * 1000.0) / float(sample_rate)
+        if target_ms > block_ms + 1e-9:
+            raise ValueError(
+                f"post_beamforming_block_ms ({target_ms:g} ms) must not exceed the beamforming block duration ({block_ms:.3f} ms)"
+            )
+
+        target_samples = _ms_to_samples(sample_rate, target_ms)
+        if target_samples <= 0:
+            raise ValueError("post_beamforming_block_ms resolved to zero samples")
+
+        ratio = block_sample_count / float(target_samples)
+        if abs(ratio - round(ratio)) > 1e-6:
+            raise ValueError(
+                f"post_beamforming_block_ms ({target_ms:g} ms) must cleanly divide the beamforming block duration ({block_ms:.3f} ms). "
+                f"Use a divisor such as 10 ms or 5 ms for a 20 ms beamforming block."
+            )
+
+        return int(target_samples)
+
+    def _process_post_beamforming_block(self, mono_block: np.ndarray, sample_rate: int) -> np.ndarray:
+        """Run filters and AGC on a mono block, optionally splitting it into smaller chunks."""
+        mono_block = np.asarray(mono_block, dtype=np.float32).reshape(-1)
+        if mono_block.size == 0:
+            return mono_block
+
+        subblock_samples = self._resolve_post_beamforming_block_samples(mono_block.size, sample_rate)
+        if subblock_samples >= mono_block.size:
+            subblocks = (mono_block,)
+        else:
+            subblocks = tuple(mono_block[i:i + subblock_samples] for i in range(0, mono_block.size, subblock_samples))
+
+        processed_chunks: list[np.ndarray] = []
+        for subblock in subblocks:
+            chunk = np.asarray(subblock, dtype=np.float32).reshape(-1)
+            for filt in self.filters or []:
+                if callable(getattr(filt, "apply", None)):
+                    try:
+                        chunk = np.asarray(filt.apply(chunk), dtype=np.float32).reshape(-1)
+                    except Exception as filter_err:
+                        self.logger.warning(f"[Filter] {type(filter_err).__name__}: {filter_err}")
+                        break
+
+            if self.agc is not None and chunk.size > 0:
+                try:
+                    chunk = np.asarray(self.agc.process(chunk, sample_rate=sample_rate), dtype=np.float32).reshape(-1)
+                except Exception as agc_err:
+                    self.logger.warning(f"[AGC] {type(agc_err).__name__}: {agc_err}")
+
+            if chunk.size > 0:
+                processed_chunks.append(chunk)
+
+        if not processed_chunks:
+            return np.zeros(0, dtype=np.float32)
+        if len(processed_chunks) == 1:
+            return processed_chunks[0]
+        return np.concatenate(processed_chunks)
 
     def stop_realtime(self):
         if not self._is_running:
@@ -690,25 +781,52 @@ class Array_RealTime(Array):
                     )
                     self._alert_state["beamformer_peak_last"] = now_alert
 
-                for filt in self.filters or []:
-                    if callable(getattr(filt, "apply", None)):
-                        try:
-                            mono_out = np.asarray(filt.apply(mono_out), dtype=np.float32).reshape(-1)
-                            # Use filter's own timing measurement
-                            if hasattr(filt, 'last_process_time_ms'):
-                                timing_accumulators['filters_ms'].append(filt.last_process_time_ms)
-                        except Exception as filter_err:
-                            self.logger.warning(f"[Filter] {type(filter_err).__name__}: {filter_err}")
-
                 output_sample_rate = self.downsample_rate if self.downsample_rate is not None else self.sampling_rate
-                if self.agc is not None:
-                    agc_start = time.monotonic()
-                    mono_out = np.asarray(self.agc.process(mono_out, sample_rate=output_sample_rate), dtype=np.float32).reshape(-1)
-                    agc_elapsed = time.monotonic() - agc_start
-                    if hasattr(self.agc, 'last_process_time_ms'):
+                if self.post_beamforming_block_ms is not None:
+                    validated_samples = self._resolve_post_beamforming_block_samples(mono_out.size, output_sample_rate)
+                    self._post_block_validation_state = {
+                        "validated": True,
+                        "samples": validated_samples,
+                        "rate": output_sample_rate,
+                    }
+
+                post_block_samples = self._resolve_post_beamforming_block_samples(mono_out.size, output_sample_rate)
+                if post_block_samples < mono_out.size:
+                    processed_chunks = []
+                    for start_idx in range(0, mono_out.size, post_block_samples):
+                        chunk = mono_out[start_idx:start_idx + post_block_samples]
+
+                        for filt in self.filters or []:
+                            if callable(getattr(filt, "apply", None)):
+                                try:
+                                    chunk = np.asarray(filt.apply(chunk), dtype=np.float32).reshape(-1)
+                                    if hasattr(filt, 'last_process_time_ms'):
+                                        timing_accumulators['filters_ms'].append(filt.last_process_time_ms)
+                                except Exception as filter_err:
+                                    self.logger.warning(f"[Filter] {type(filter_err).__name__}: {filter_err}")
+                                    chunk = np.zeros(0, dtype=np.float32)
+                                    break
+
+                        if chunk.size > 0 and self.agc is not None:
+                            agc_start = time.monotonic()
+                            chunk = np.asarray(self.agc.process(chunk, sample_rate=output_sample_rate), dtype=np.float32).reshape(-1)
+                            agc_elapsed = time.monotonic() - agc_start
+                            if hasattr(self.agc, 'last_process_time_ms'):
+                                timing_accumulators['agc_ms'].append(self.agc.last_process_time_ms)
+                            else:
+                                timing_accumulators['agc_ms'].append(agc_elapsed * 1000.0)
+
+                        if chunk.size > 0:
+                            processed_chunks.append(chunk)
+
+                    mono_out = np.concatenate(processed_chunks) if processed_chunks else np.zeros(0, dtype=np.float32)
+                else:
+                    mono_out = self._process_post_beamforming_block(mono_out, output_sample_rate)
+                    for filt in self.filters or []:
+                        if hasattr(filt, 'last_process_time_ms'):
+                            timing_accumulators['filters_ms'].append(filt.last_process_time_ms)
+                    if self.agc is not None and hasattr(self.agc, 'last_process_time_ms'):
                         timing_accumulators['agc_ms'].append(self.agc.last_process_time_ms)
-                    else:
-                        timing_accumulators['agc_ms'].append(agc_elapsed * 1000.0)
 
                 post_agc_peak = float(np.max(np.abs(mono_out))) if mono_out.size > 0 else 0.0
                 if post_agc_peak >= self._post_agc_warn_threshold and (now_alert - self._alert_state["post_agc_peak_last"]) >= self._warn_interval_s:

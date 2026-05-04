@@ -176,6 +176,8 @@ if __name__ == "__main__":
         
     blocksize = 960
     # => 20ms blocks for the buffer (960/48kHz = 0.02s)
+    post_beamforming_block_ms = 10.0
+    # 20ms beamforming blocks can be split into 10ms or 5ms sub-blocks.
     
     logger = logging.getLogger("MicArrayTest")
     logger.setLevel(logging.DEBUG)
@@ -213,7 +215,7 @@ if __name__ == "__main__":
     agc_logger.addHandler(console_handler)
     codec_logger.addHandler(console_handler)
 
-    geometry = 4
+    geometry = 2
     
     if geometry == 1:
         geometry_path = "1_Square.xml"
@@ -331,6 +333,7 @@ if __name__ == "__main__":
         output_mode=output_mode,
         output_boundary_fade_ms=0.0,
         downsample_rate=downsample_rate,
+        post_beamforming_block_ms=post_beamforming_block_ms,
         initial_silence_duration=2.0,  # Silence period for baseline learning (filter protects against corruption during onset)
     )
 
