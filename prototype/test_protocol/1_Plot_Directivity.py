@@ -22,6 +22,7 @@ def plot_directivity(
     half_rotation=False,
     side=False,
     source="rms",
+    show_plot=True,
 ):
     """
     Plot directivity pattern from measurement data.
@@ -46,6 +47,7 @@ def plot_directivity(
               If False with --half-rotation, apply front pattern mode (-90 to 90°, no mirroring).
         source: Which values to plot for the main directivity curve: "rms" uses the
                 smoothed RMS-derived values, "gain" uses the unedited gain_db column.
+        show_plot: If True, display the plot window after creating the figure.
     """
     # Load data
     df = pd.read_csv(csv_file)
@@ -186,7 +188,8 @@ def plot_directivity(
         plt.savefig(output_file, dpi=300, bbox_inches='tight')
         print(f"Plot saved to: {output_file}")
 
-    plt.show()
+    if show_plot:
+        plt.show()
 
     # Print statistics
     print("\n" + "="*60)
@@ -213,6 +216,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Plot ReSpeaker directivity measurements')
     parser.add_argument('csv_file', type=str, help='Path to CSV file with measurements')
     parser.add_argument('--no-save', action='store_true', help='Do not save plot to file')
+    parser.add_argument('--no-show', action='store_true', help='Do not display the plot window after creating the graph')
     parser.add_argument('--save-location', type=str, default=None, help='Optional directory to save plot (default: same directory as CSV file)')
     parser.add_argument('--source', choices=('rms', 'gain'), default='rms',
                         help='Choose which values to plot: rms uses the smoothed RMS-derived values, gain uses the unedited gain_db')
@@ -239,6 +243,7 @@ if __name__ == '__main__':
         half_rotation=args.half_rotation,
         side=args.side,
         source=args.source,
+        show_plot=not args.no_show,
     )
 
     
