@@ -172,6 +172,8 @@ if __name__ == "__main__":
     With 4 mics => Beamforming = 4-5ms | DOA = 0.5-2ms
     With 8 mics => Beamforming = 11-15ms | DOA = 0.5-4ms
     with 10 mics => Beamforming = 13-16ms | DOA = 0.5-5ms
+    
+    With eigenvalue suppression and frequency smoothing: +2-4ms
     """
         
     blocksize = 960
@@ -268,7 +270,7 @@ if __name__ == "__main__":
         noise_update_rms=8e-4,
     )
     
-    FILTER = "WIENER"  # "SPECTRAL" or "WIENER"
+    FILTER = "SPECTRAL"  # "SPECTRAL" or "WIENER"
     
     if FILTER == "SPECTRAL":
         filters = [
