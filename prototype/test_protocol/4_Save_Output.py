@@ -84,7 +84,7 @@ def _build_pipeline(
 	enable_coherence_suppression: bool = True,
 	enable_backward_null_constraint: bool = True,
 	enable_output_crossfade: bool = True,
-	max_beamform_freq_hz: float = 8000.0,
+	max_beamform_freq: float = 8000.0,
 ):
 	geometry_path = _resolve_geometry_path(int(geometry))
 	mic_channel_numbers = [0] if single_mic else list(range(int(num_mics)))
@@ -99,36 +99,36 @@ def _build_pipeline(
 		mic_positions = MVDRBeamformer.load_positions_from_xml(str(geometry_path))
 
 		das_beamformer = DASBeamformer(
-            logger=logger,
-            mic_channel_numbers=mic_channel_numbers,
-            sample_rate=sample_rate,
-            mic_positions_m=mic_positions,
+			logger=logger,
+			mic_channel_numbers=mic_channel_numbers,
+			sample_rate=sample_rate,
+			mic_positions_m=mic_positions,
 		)
 
 		beamformer = MVDRBeamformer(
-            logger=logger,
-            mic_channel_numbers=mic_channel_numbers,
-            sample_rate=sample_rate,
-            mic_positions_m=mic_positions,
-            covariance_alpha=0.95,
-            diagonal_loading=0.15,
-            spectral_whitening_factor=0.12,
-            weight_smooth_alpha=0.72,
-            max_adaptive_loading_scale=4.0,
+			logger=logger,
+			mic_channel_numbers=mic_channel_numbers,
+			sample_rate=sample_rate,
+			mic_positions_m=mic_positions,
+			covariance_alpha=0.95,
+			diagonal_loading=0.15,
+			spectral_whitening_factor=0.12,
+			weight_smooth_alpha=0.72,
+			max_adaptive_loading_scale=4.0,
 			enable_frequency_smoothing=enable_frequency_smoothing,
 			frequency_smoothing_strength=frequency_smoothing_strength,
 			enable_eigenvalue_suppression=enable_eigenvalue_suppression,
 			enable_adaptive_loading=enable_adaptive_loading,
 			enable_weight_smoothing=enable_weight_smoothing,
-            coherence_suppression_strength=0.8,
+			coherence_suppression_strength=0.8,
 			enable_coherence_suppression=enable_coherence_suppression,
-            weight_smooth_alpha_min=0.45,
-            weight_smooth_alpha_max=0.82,
-            snr_threshold_for_sharpening=2.0,
-				enable_backward_null_constraint=enable_backward_null_constraint,
-            backward_null_strength=0.9,
-				enable_output_crossfade=enable_output_crossfade,
-				max_beamform_freq_hz=max_beamform_freq_hz,
+			weight_smooth_alpha_min=0.45,
+			weight_smooth_alpha_max=0.82,
+			snr_threshold_for_sharpening=2.0,
+			enable_backward_null_constraint=enable_backward_null_constraint,
+			backward_null_strength=0.9,
+			enable_output_crossfade=enable_output_crossfade,
+			max_beamform_freq=max_beamform_freq,
 		)
 	 
 	 
@@ -175,7 +175,7 @@ def _build_pipeline(
 			order=4,
 		),
 		denoiser,
-    ]
+	]
 
 	agc = AGCChain(logger=logger, stages=[
 		NoiseAwareAdaptiveAmplifier(
@@ -232,7 +232,7 @@ def run_save_output(
 	enable_coherence_suppression: bool = True,
 	enable_backward_null_constraint: bool = True,
 	enable_output_crossfade: bool = True,
-    max_beamform_freq_hz: float = 6000.0,
+	max_beamform_freq_hz: float = 6000.0,
 ):
 	output_path = Path(output_dir)
 	output_path.mkdir(parents=True, exist_ok=True)
@@ -256,12 +256,17 @@ def run_save_output(
 		)
 
 	logger = logging.getLogger("SaveOutput")
+	# Configure root logging so all module loggers propagate to the console
+	# Use basicConfig only if the root logger has no handlers yet.
+	if not logging.getLogger().handlers:
+		logging.basicConfig(
+			level=logging.INFO,
+			stream=sys.stdout,
+			format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+		)
+	# Ensure this module logger is set to INFO and will propagate to root handlers
 	logger.setLevel(logging.INFO)
-	if not logger.handlers:
-		handler = logging.StreamHandler()
-		handler.setLevel(logging.INFO)
-		handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
-		logger.addHandler(handler)
+	logger.propagate = True
 
 	geometry_path, mic_channel_numbers, _mic_positions, beamformer, doa_estimator, filters, agc = _build_pipeline(
 		logger=logger,
@@ -280,7 +285,7 @@ def run_save_output(
 		enable_coherence_suppression=enable_coherence_suppression,
 		enable_backward_null_constraint=enable_backward_null_constraint,
 		enable_output_crossfade=enable_output_crossfade,
-		max_beamform_freq_hz=max_beamform_freq_hz,
+		max_beamform_freq=max_beamform_freq_hz,
 	)
 
 	warn_bytes = int(max(1.0, float(warn_size_mb)) * 1024 * 1024)
@@ -306,12 +311,12 @@ def run_save_output(
 		filter_name = "WienerFilter" if filter_type.lower() == "wiener" else "SpectralSubtractionFilter"
 		print(f"  Pipeline: MVDR + BandPass + {filter_name}(ON) + AGC(ON)")
 	print(f"  Optional MVDR stages: freq_smooth={'ON' if enable_frequency_smoothing else 'OFF'}, "
-	      f"eigen_sup={'ON' if enable_eigenvalue_suppression else 'OFF'}, "
-	      f"adaptive_load={'ON' if enable_adaptive_loading else 'OFF'}, "
-	      f"weight_smooth={'ON' if enable_weight_smoothing else 'OFF'}, "
-	      f"coherence={'ON' if enable_coherence_suppression else 'OFF'}, "
-	      f"back_null={'ON' if enable_backward_null_constraint else 'OFF'}, "
-	      f"crossfade={'ON' if enable_output_crossfade else 'OFF'}")
+		  f"eigen_sup={'ON' if enable_eigenvalue_suppression else 'OFF'}, "
+		  f"adaptive_load={'ON' if enable_adaptive_loading else 'OFF'}, "
+		  f"weight_smooth={'ON' if enable_weight_smoothing else 'OFF'}, "
+		  f"coherence={'ON' if enable_coherence_suppression else 'OFF'}, "
+		  f"back_null={'ON' if enable_backward_null_constraint else 'OFF'}, "
+		  f"crossfade={'ON' if enable_output_crossfade else 'OFF'}")
 	print(f"  Max beamform freq: {float(max_beamform_freq_hz):.0f} Hz")
 	print(f"  Freeze beamformer: {freeze_beamformer}")
 	if freeze_beamformer:

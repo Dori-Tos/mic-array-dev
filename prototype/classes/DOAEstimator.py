@@ -85,6 +85,7 @@ class IterativeDOAEstimator(DOAEstimator):
         beamformer: Beamformer | None = None,
         scan_step_deg: float = 1.0,
         smooth_step_deg: float = 1.5,
+        doa_smoothing_interval_ms: float = 100.0,
         normalize_channels: bool = True,
         bootstrap_full_scan: bool = True,
         periodic_full_scan_blocks: int = 60,
@@ -112,6 +113,9 @@ class IterativeDOAEstimator(DOAEstimator):
         self.beamformer = beamformer
         self.scan_step_deg = float(scan_step_deg)
         self.smooth_step_deg = float(smooth_step_deg)
+        # Time interval between successive smoothing steps (ms). If > block rate,
+        # smoothing will only advance at this interval instead of every block.
+        self.doa_smoothing_interval_ms = float(doa_smoothing_interval_ms)
         self.normalize_channels = bool(normalize_channels)
         self.bootstrap_full_scan = bool(bootstrap_full_scan)
         self.periodic_full_scan_blocks = int(periodic_full_scan_blocks)
@@ -136,6 +140,8 @@ class IterativeDOAEstimator(DOAEstimator):
         self._stepping_log_interval = 0.25  # seconds between stepping logs
         # Adaptive stepping: scale per-block step based on confidence (0.5x to 2.0x)
         self._last_confidence_db = None  # Track confidence for adaptive stepping logic
+        # Time of last smoothing step (monotonic seconds). None until first step.
+        self._last_smoothing_time: float | None = None
 
     def reset(self):
         self._last_update_time = 0.0
@@ -148,6 +154,7 @@ class IterativeDOAEstimator(DOAEstimator):
         self._smoothed_doa = None
         self._target_doa = None
         self._last_confidence_db = None
+        self._last_smoothing_time = None
 
     def _compute_gain(self, block: np.ndarray, angle_deg: float) -> float:
         beamformed = self.doa_beamformer.apply(block, theta_deg=float(angle_deg))
@@ -336,18 +343,26 @@ class IterativeDOAEstimator(DOAEstimator):
         
         # Calculate distance to target
         distance = self._target_doa - self._smoothed_doa
-        
+
+        # Time gating: only advance smoothing at configured interval
+        now = time.monotonic()
+        if self.doa_smoothing_interval_ms is not None and self.doa_smoothing_interval_ms > 0.0:
+            if self._last_smoothing_time is not None:
+                elapsed = (now - self._last_smoothing_time) * 1000.0
+                if elapsed < self.doa_smoothing_interval_ms:
+                    return
+
         # Compute adaptive step based on confidence
         adaptive_multiplier = self._get_adaptive_step_rate()
         adaptive_step = self.smooth_step_deg * adaptive_multiplier
-        
+
         # Move at most adaptive_step towards target
-        now = time.monotonic()
         if abs(distance) > adaptive_step:
             # Not at target yet: step towards it
             step_sign = 1.0 if distance > 0 else -1.0
             self._smoothed_doa += step_sign * adaptive_step
-            # Throttle stepping logs to avoid flooding
+            # Record smoothing time and throttle stepping logs to avoid flooding
+            self._last_smoothing_time = now
             if now - self._last_stepping_log_time >= self._stepping_log_interval:
                 conf_str = f"{self._last_confidence_db:.1f}" if self._last_confidence_db is not None else "??"
                 self.logger.debug(
@@ -359,6 +374,7 @@ class IterativeDOAEstimator(DOAEstimator):
             # Close enough: snap to target
             if abs(self._smoothed_doa - self._target_doa) > 1e-9:
                 self._smoothed_doa = self._target_doa
+                self._last_smoothing_time = now
                 # Log reached-target at most once per interval
                 if now - self._last_stepping_log_time >= self._stepping_log_interval:
                     self.logger.debug(f"[DOA] ✓ Reached target: {self._smoothed_doa:.1f}°")

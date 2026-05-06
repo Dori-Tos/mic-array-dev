@@ -143,7 +143,7 @@ def _build_mode_components(
         doa_beamformer=das_beamformer,
         beamformer=mvdr_beamformer,
         scan_step_deg=3.0,
-        smooth_step_deg=1.0,
+        smooth_step_deg=2.0,
         local_search_radius_deg=9.0,
         periodic_full_scan_blocks=20,
     )
