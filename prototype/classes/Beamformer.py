@@ -253,6 +253,8 @@ class MVDRBeamformer(Beamformer):
     - Temporal MVDR weight smoothing to reduce bursty artifacts with off-axis interferers
     - Suppresses diffuse sources and side-source artifacts with minimal computational cost
     - Maintains real-time performance (~20ms per block)
+
+    Optional stages can be enabled or disabled independently.
     
     :param mic_channel_numbers: List of channel indices.
     :param sample_rate: Sample rate of the audio in Hz.
@@ -266,9 +268,15 @@ class MVDRBeamformer(Beamformer):
     :param weight_smooth_alpha: Temporal smoothing for MVDR weights (0 = no smoothing, close to 1 = smoother/more stable).
         This is now a baseline; actual alpha adapts based on SNR for best directivity.
     :param max_adaptive_loading_scale: Upper bound for adaptive loading scale to avoid over-whitening.
+    :param enable_frequency_smoothing: Smooth covariance across nearby frequency bins before EMA update.
+    :param frequency_smoothing_strength: Blend factor for frequency smoothing when enabled.
+    :param enable_eigenvalue_suppression: Boost diagonal loading when the dominant eigenvalue dominates.
+    :param enable_adaptive_loading: Enable SNR-dependent adaptive diagonal loading.
+    :param enable_weight_smoothing: Enable temporal smoothing of MVDR weights.
     :param coherence_suppression_strength: Strength of diffuse noise suppression via coherence weighting (0–1).
         0.0 = no suppression (pure MVDR), 1.0 = maximum suppression (aggressive noise reduction).
         Default 0.5 balances directivity with speech preservation.
+    :param enable_coherence_suppression: Enable coherence-based output modulation.
     :param backward_null_strength: Strength of spatial null constraint at 180° (back diffraction suppression).
         0.0 = disabled (pure MVDR with normal side-lobes at back).
         0.5 = moderate back suppression via MVDR null constraint (default).
@@ -288,11 +296,20 @@ class MVDRBeamformer(Beamformer):
         spectral_whitening_factor: float = 0.3,
         weight_smooth_alpha: float = 0.82,
         max_adaptive_loading_scale: float = 8.0,
+        enable_frequency_smoothing: bool = True,
+        frequency_smoothing_strength: float = 0.3,
+        enable_eigenvalue_suppression: bool = True,
+        enable_adaptive_loading: bool = True,
+        enable_weight_smoothing: bool = True,
         coherence_suppression_strength: float = 0.5,
+        enable_coherence_suppression: bool = True,
         weight_smooth_alpha_min: float = 0.45,
         weight_smooth_alpha_max: float = 0.82,
         snr_threshold_for_sharpening: float = 2.0,
+        enable_backward_null_constraint: bool = True,
         backward_null_strength: float = 0.5,
+        enable_output_crossfade: bool = True,
+        max_beamform_freq_hz: float = 6000.0,
     ):
         super().__init__(
             logger=logger,
@@ -331,8 +348,26 @@ class MVDRBeamformer(Beamformer):
         self.weight_smooth_alpha_max = float(weight_smooth_alpha_max)  # Stable (noisy conditions)
         self.snr_threshold_for_sharpening = float(snr_threshold_for_sharpening)  # Transition point
         self.max_adaptive_loading_scale = float(max_adaptive_loading_scale)
+        self.enable_frequency_smoothing = bool(enable_frequency_smoothing)
+        self.frequency_smoothing_strength = float(frequency_smoothing_strength)
+        self.enable_eigenvalue_suppression = bool(enable_eigenvalue_suppression)
+        self.enable_adaptive_loading = bool(enable_adaptive_loading)
+        self.enable_weight_smoothing = bool(enable_weight_smoothing)
         self.coherence_suppression_strength = float(coherence_suppression_strength)
+        self.enable_coherence_suppression = bool(enable_coherence_suppression)
         self.backward_null_strength = float(backward_null_strength)  # Null suppression at 180°
+        self.enable_backward_null_constraint = bool(enable_backward_null_constraint)
+        self.enable_output_crossfade = bool(enable_output_crossfade)
+        # If <= 0 or None, masked beamforming is disabled (process all bins)
+        if max_beamform_freq_hz is None:
+            self.max_beamform_freq_hz = None
+        else:
+            max_b = float(max_beamform_freq_hz)
+            if max_b <= 0.0:
+                self.max_beamform_freq_hz = None
+            else:
+                # Clip to Nyquist for safety
+                self.max_beamform_freq_hz = min(max_b, float(self.sample_rate) / 2.0)
         self._covariance: np.ndarray | None = None
         self._prev_weights: np.ndarray | None = None
         self._power_iteration_vec: np.ndarray | None = None
@@ -647,96 +682,134 @@ class MVDRBeamformer(Beamformer):
         self._ensure_covariance(freq_bins)
         assert self._covariance is not None
 
-        # Compute SNR estimate once per block for efficient adaptive loading.
-        block_snr_ratio = self._compute_block_snr_estimate(spectrum)
+        try:
+            freq_hz = np.fft.rfftfreq(n_samples, d=1.0 / self.sample_rate)
+        except Exception:
+            freq_hz = np.fft.rfftfreq(2 * (freq_bins - 1), d=1.0 / self.sample_rate)
 
-        # Vectorized covariance update for all bins.
-        r_inst = spectrum[:, :, None] * np.conj(spectrum[:, None, :])
+        if self.max_beamform_freq_hz is not None and 0.0 < self.max_beamform_freq_hz < (self.sample_rate / 2.0):
+            process_mask = freq_hz <= float(self.max_beamform_freq_hz)
+            if process_mask.shape[0] != freq_bins:
+                process_mask = np.resize(process_mask, freq_bins)
+        else:
+            process_mask = np.ones(freq_bins, dtype=bool)
+
+        # Start with a zero-cost pass-through for skipped bins. This avoids any beamforming
+        # work above the cutoff and lets downstream bandpass filtering remove those bins.
+        output_spectrum = spectrum[:, 0].copy()
+
+        if not np.any(process_mask):
+            return np.fft.irfft(output_spectrum, n=n_samples).astype(np.float64, copy=False)
+
+        # Compute SNR estimate only when a stage actually needs it.
+        need_snr_estimate = (
+            self.enable_adaptive_loading
+            or self.enable_weight_smoothing
+            or self.enable_eigenvalue_suppression
+        )
+        spectrum_proc = spectrum[process_mask]
+        steering_proc = steering[process_mask]
+        block_snr_ratio = self._compute_block_snr_estimate(spectrum_proc) if need_snr_estimate else 1.0
+
+        # Update covariance only for processed bins.
+        r_inst_proc = spectrum_proc[:, :, None] * np.conj(spectrum_proc[:, None, :])
         
         # FREQUENCY-SMOOTHING: Reduce noise jitter by smoothing covariance across nearby bins.
         # Low frequencies benefit from aggressive smoothing; high frequencies use minimal smoothing.
-        # This improves SNR estimate stability (~2 dB gain) without destroying directivity.
-        r_inst = self._smooth_covariance_across_frequencies(r_inst, freq_bins)
+        # Keep this optional because it can smear transient detail in some rooms.
+        if self.enable_frequency_smoothing:
+            r_inst_proc = self._smooth_covariance_across_frequencies(r_inst_proc, int(r_inst_proc.shape[0]))
         
-        self._covariance = (
-            self.covariance_alpha * self._covariance
-            + (1.0 - self.covariance_alpha) * r_inst
+        self._covariance[process_mask] = (
+            self.covariance_alpha * self._covariance[process_mask]
+            + (1.0 - self.covariance_alpha) * r_inst_proc
         )
 
         # Robust, frequency-dependent loading.
-        trace_r = np.real(np.trace(self._covariance, axis1=1, axis2=2))
+        trace_r = np.real(np.trace(self._covariance[process_mask], axis1=1, axis2=2))
         base_loading = self.diagonal_loading * (trace_r / self.channel_count + self._eps)
-        inv_snr = np.clip(1.0 / (block_snr_ratio + self._eps), 0.0, self.max_adaptive_loading_scale)
-        adaptive_loading = self.diagonal_loading * (1.0 + self.spectral_whitening_factor * inv_snr)
+        if self.enable_adaptive_loading:
+            inv_snr = np.clip(1.0 / (block_snr_ratio + self._eps), 0.0, self.max_adaptive_loading_scale)
+            adaptive_loading = self.diagonal_loading * (1.0 + self.spectral_whitening_factor * inv_snr)
+        else:
+            adaptive_loading = 0.0
         total_loading = base_loading + adaptive_loading
         
         # EIGENVALUE-BASED NOISE SUBSPACE SUPPRESSION: Boost loading when noise eigenvalues dominate.
         # When dominant_eigenvalue >> avg_eigenvalue, signal is strong but noise floor is raised.
         # Suppress noise eigenvalues by boosting diagonal loading.
         # Suppression ratio ranges from 1.0 (no suppression) to 3.0 (aggressive).
-        eigenvalue_suppression_ratio = np.clip(
-            self._last_dominant_eigenvalue / (self._last_avg_eigenvalue + self._eps),
-            1.0, 3.0
-        )
-        total_loading = total_loading * eigenvalue_suppression_ratio
+        if self.enable_eigenvalue_suppression:
+            eigenvalue_suppression_ratio = np.clip(
+                self._last_dominant_eigenvalue / (self._last_avg_eigenvalue + self._eps),
+                1.0, 3.0
+            )
+            total_loading = total_loading * eigenvalue_suppression_ratio
         
-        r_loaded = self._covariance + total_loading[:, None, None] * self._identity[None, :, :]
+        r_loaded_proc = self._covariance[process_mask] + total_loading[:, None, None] * self._identity[None, :, :]
 
-        # Batched MVDR solve across all frequency bins.
         try:
-            r_inv_a = np.linalg.solve(r_loaded, steering[:, :, None])[..., 0]
+            r_inv_a_sub = np.linalg.solve(r_loaded_proc, steering_proc[:, :, None])[..., 0]
         except (np.linalg.LinAlgError, ValueError):
-            r_inv_a = np.einsum("fij,fj->fi", np.linalg.pinv(r_loaded), steering, optimize=True)
+            r_inv_a_sub = np.einsum("fij,fj->fi", np.linalg.pinv(r_loaded_proc), steering_proc, optimize=True)
 
-        denom = np.einsum("fi,fi->f", np.conj(steering), r_inv_a, optimize=True)
-        weights = np.empty_like(r_inv_a)
-        valid = np.abs(denom) > self._eps
-        weights[valid] = r_inv_a[valid] / denom[valid, None]
-        weights[~valid] = 1.0 / self.channel_count
+        denom_sub = np.einsum("fi,fi->f", np.conj(steering_proc), r_inv_a_sub, optimize=True)
+        weights_sub = np.empty_like(r_inv_a_sub)
+        valid_sub = np.abs(denom_sub) > self._eps
+        weights_sub[valid_sub] = r_inv_a_sub[valid_sub] / denom_sub[valid_sub, None]
+        weights_sub[~valid_sub] = 1.0 / self.channel_count
+
+        weights = np.zeros_like(steering)
+        weights[process_mask] = weights_sub
 
         # Temporal smoothing suppresses rapid weight swings that cause popping with side/rear interferers.
         # Use adaptive smoothing factor to sharpen main lobe during steady-state high-SNR conditions.
-        if self._prev_weights is not None and self._prev_weights.shape == weights.shape:
+        if self.enable_weight_smoothing and self._prev_weights is not None and self._prev_weights.shape == weights.shape:
             adaptive_alpha = self._compute_adaptive_weight_smooth_alpha(block_snr_ratio)
             weights = adaptive_alpha * self._prev_weights + (1.0 - adaptive_alpha) * weights
 
         # Re-enforce distortionless response after smoothing.
-        smooth_denom = np.einsum("fi,fi->f", np.conj(steering), weights, optimize=True)
+        smooth_denom = np.einsum("fi,fi->f", np.conj(steering_proc), weights[process_mask], optimize=True)
         valid_smooth = np.abs(smooth_denom) > self._eps
-        weights[valid_smooth] = weights[valid_smooth] / smooth_denom[valid_smooth, None]
-        weights[~valid_smooth] = 1.0 / self.channel_count
-        self._prev_weights = weights.copy()
+        weights_proc = weights[process_mask]
+        weights_proc[valid_smooth] = weights_proc[valid_smooth] / smooth_denom[valid_smooth, None]
+        weights_proc[~valid_smooth] = 1.0 / self.channel_count
+        weights[process_mask] = weights_proc
+        if self.enable_weight_smoothing:
+            self._prev_weights = weights.copy()
+        else:
+            self._prev_weights = None
 
         # BACKWARD NULL CONSTRAINT: Suppress back diffraction at 180° (particularly effective at low frequencies).
         # This targets the physical problem of open-backed MEMS arrays where diffraction creates large back lobes.
-        if self.backward_null_strength > self._eps:
-            weights = self._apply_backward_null_constraint(weights, steering, theta_rad)
+        if self.enable_backward_null_constraint and self.backward_null_strength > self._eps:
+            weights_proc = self._apply_backward_null_constraint(weights[process_mask], steering_proc, theta_rad)
+            weights[process_mask] = weights_proc
 
         # COHERENCE-BASED SIDELOBE SUPPRESSION: Suppress diffuse noise while preserving main source
         # Compute inter-channel coherence (0=diffuse, 1=coherent point-source)
-        coherence = self._compute_coherence_strength(spectrum)  # Shape: (freq_bins,)
-        
-        # Apply user-controlled suppression strength to coherence gain
-        # suppression_strength = 0.0: No suppression, pure MVDR
-        # suppression_strength = 0.5 (default): Balanced suppression
-        # suppression_strength = 1.0: Aggressive suppression
-        # 
-        # Coherence gain mapping with tunable strength:
-        # - High coherence (0.95) -> gain ~0.975 (almost full MVDR)
-        # - Medium coherence (0.5) -> gain ~0.75 (moderate suppression)
-        # - Low coherence (0.1) -> gain ~0.55 at strength=0.5, or 0.1 at strength=1.0
-        base_gain = 0.5 + 0.5 * coherence  # Base mapping: [0, 1] -> [0.5, 1.0]
-        coherence_gain = base_gain ** (1.0 - 0.8 * self.coherence_suppression_strength)
-        # ^ At strength=0.5: ^0.6 exponent, adds mid-range suppression
-        # ^ At strength=1.0: ^0.2 exponent, very aggressive suppression
-        
-        # Apply coherence-based modulation to the output spectrum
-        # This reduces energy from frequency bins with low inter-channel coherence (diffuse noise)
-        output_spectrum = np.einsum("fi,fi->f", np.conj(weights), spectrum, optimize=True)
-        output_spectrum *= coherence_gain  # Suppress low-coherence frequencies
-
-        # Store coherence for external use (e.g., AGC coherence gating)
-        self._last_coherence = coherence.copy()
+        output_spectrum[process_mask] = np.einsum("fi,fi->f", np.conj(weights[process_mask]), spectrum_proc, optimize=True)
+        if self.enable_coherence_suppression:
+            coherence = self._compute_coherence_strength(spectrum_proc)  # Shape: (processed_bins,)
+            
+            # Apply user-controlled suppression strength to coherence gain
+            # suppression_strength = 0.0: No suppression, pure MVDR
+            # suppression_strength = 0.5 (default): Balanced suppression
+            # suppression_strength = 1.0: Aggressive suppression
+            # 
+            # Coherence gain mapping with tunable strength:
+            # - High coherence (0.95) -> gain ~0.975 (almost full MVDR)
+            # - Medium coherence (0.5) -> gain ~0.75 (moderate suppression)
+            # - Low coherence (0.1) -> gain ~0.55 at strength=0.5, or 0.1 at strength=1.0
+            base_gain = 0.5 + 0.5 * coherence  # Base mapping: [0, 1] -> [0.5, 1.0]
+            coherence_gain = base_gain ** (1.0 - 0.8 * self.coherence_suppression_strength)
+            # ^ At strength=0.5: ^0.6 exponent, adds mid-range suppression
+            # ^ At strength=1.0: ^0.2 exponent, very aggressive suppression
+            output_spectrum[process_mask] *= coherence_gain  # Suppress low-coherence frequencies
+            self._last_coherence = np.ones(freq_bins, dtype=np.float64)
+            self._last_coherence[process_mask] = coherence.copy()
+        else:
+            self._last_coherence = np.ones(freq_bins, dtype=np.float64)
 
         return np.fft.irfft(output_spectrum, n=n_samples).astype(np.float64, copy=False)
 
@@ -745,20 +818,22 @@ class MVDRBeamformer(Beamformer):
         angle = self.get_steering_angle() if theta_deg is None else float(theta_deg)
         result = self.process(block, angle)
 
-        # Output-level boundary crossfade: apply fade-in and fade-out near block edges
-        # to smooth discontinuities caused by adaptive weight smoothing.
-        # This must happen HERE (at beamformer output) before filters/AGC process the signal,
-        # so the crossfade fixes the problem at its source, not as a post-hoc patch.
         result_arr = np.asarray(result, dtype=np.float64)
+        if self.enable_output_crossfade:
+            # Output-level boundary crossfade: apply fade-in and fade-out near block edges
+            # to smooth discontinuities caused by adaptive weight smoothing.
+            # This must happen HERE (at beamformer output) before filters/AGC process the signal,
+            # so the crossfade fixes the problem at its source, not as a post-hoc patch.
+            n_fade_samples = min(len(result_arr) // 8, 64)
+            if n_fade_samples > 2:
+                fade_in = np.linspace(0.0, 1.0, n_fade_samples, dtype=np.float64)
+                fade_out = fade_in[::-1]
 
-        n_fade_samples = min(len(result_arr) // 8, 64)
-        if n_fade_samples > 2:
-            fade_in = np.linspace(0.0, 1.0, n_fade_samples, dtype=np.float64)
-            fade_out = fade_in[::-1]
-
-            output_arr = result_arr.copy()
-            output_arr[:n_fade_samples] *= fade_in
-            output_arr[-n_fade_samples:] *= fade_out
+                output_arr = result_arr.copy()
+                output_arr[:n_fade_samples] *= fade_in
+                output_arr[-n_fade_samples:] *= fade_out
+            else:
+                output_arr = result_arr
         else:
             output_arr = result_arr
 

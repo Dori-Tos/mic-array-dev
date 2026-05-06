@@ -684,7 +684,7 @@ class Array_RealTime(Array):
                 queue_size = self._audio_queue.qsize()
                 now_log = time.monotonic()
                 if dropped_stale > 0 and (now_log - self._last_catchup_log) > 0.5:
-                    self.logger.debug(f"[Catch-up] Dropped {dropped_stale} stale queued blocks, queue_size now {queue_size}")
+                    self.logger.warning(f"[Catch-up] Dropped {dropped_stale} stale queued blocks, queue_size now {queue_size}")
                     self._last_catchup_log = now_log
 
             original_rate = self.sampling_rate

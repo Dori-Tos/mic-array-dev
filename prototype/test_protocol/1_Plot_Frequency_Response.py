@@ -28,7 +28,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-BASE_PATH = Path("Python/Tests/mic-array-dev/data/test_protocol/1_polar_pattern/4_single_corner_70dB")
+BASE_PATH = Path("Python/Tests/mic-array-dev/data/test_protocol/1_polar_pattern/3_rim_70dB")
 
 DEFAULT_FILES = [
     # Edit this list to include the CSVs to use for the frequency response plot.
