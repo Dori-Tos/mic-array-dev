@@ -609,9 +609,12 @@ class SpectralSubtractionFilter(Filter):
         
         # Initialize buffers on first use
         if input_buffer is None:
-            input_buffer = np.zeros(self.hop_size, dtype=np.float64)
+            # On FIRST call, just buffer the data without processing
+            # This prevents the first frame from being [silence | signal], which corrupts noise estimation
+            input_buffer = x[:self.hop_size].copy() if x.size >= self.hop_size else x.copy()
             output_buffer = np.zeros(2 * self.hop_size, dtype=np.float64)
-        
+            # Return the first chunk as-is (no processing yet)
+            return x, input_buffer, output_buffer, noise_psd, prev_gain
         
         # Create output array
         output = np.zeros_like(x)
