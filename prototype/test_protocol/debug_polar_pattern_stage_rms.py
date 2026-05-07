@@ -80,7 +80,7 @@ def main() -> None:
     parser.add_argument("--device", type=int, default=None, help="Input device index")
     parser.add_argument("--geometry", type=int, default=2, help="Geometry selector (XML prefix)")
     parser.add_argument("--num-mics", type=int, default=8, help="Number of microphones used by the beamformer")
-    parser.add_argument("--sample-duration", type=float, default=0.8, help="Capture duration in seconds")
+    parser.add_argument("--sample-duration", type=float, default=10.0, help="Capture duration in seconds")
     parser.add_argument("--freeze-beamformer", action=argparse.BooleanOptionalAction, default=True,
                         help="Freeze steering at a fixed angle")
     parser.add_argument("--freeze-angle-deg", type=float, default=0.0, help="Fixed steering angle when frozen")
@@ -222,15 +222,15 @@ def main() -> None:
     input_rms_level, input_peak_level = _compute_input_reference_levels(audio_data, args.gain_input_reference)
     print()
     print("Input reference:")
-    print(f"  RMS:  {input_rms_level:.6f} ({_dbfs(input_rms_level):.2f} dBFS)")
-    print(f"  Peak: {input_peak_level:.6f} ({_dbfs(input_peak_level):.2f} dBFS)")
+    print(f"  RMS:  {input_rms_level:.8f} ({_dbfs(input_rms_level):.2f} dBFS)")
+    print(f"  Peak: {input_peak_level:.8f} ({_dbfs(input_peak_level):.2f} dBFS)")
 
     beamformed = beamformer.apply(audio_data, theta_deg=float(args.freeze_angle_deg))
     beamformed = np.asarray(beamformed, dtype=np.float32).reshape(-1)
     beamformed_rms = _rms_level(beamformed)
     print()
     print("After beamformer:")
-    print(f"  RMS:  {beamformed_rms:.6f} ({_dbfs(beamformed_rms):.2f} dBFS)")
+    print(f"  RMS:  {beamformed_rms:.8f} ({_dbfs(beamformed_rms):.2f} dBFS)")
     print(f"  Gain vs input: {_dbfs(beamformed_rms) - _dbfs(input_rms_level):.2f} dB")
 
     stage_output = beamformed
@@ -239,7 +239,7 @@ def main() -> None:
         stage_rms = _rms_level(stage_output)
         print()
         print(f"After filter {index} ({stage.__class__.__name__}):")
-        print(f"  RMS:  {stage_rms:.6f} ({_dbfs(stage_rms):.2f} dBFS)")
+        print(f"  RMS:  {stage_rms:.8f} ({_dbfs(stage_rms):.2f} dBFS)")
         print(f"  Gain vs input: {_dbfs(stage_rms) - _dbfs(input_rms_level):.2f} dB")
 
     if agc is not None:
@@ -247,13 +247,13 @@ def main() -> None:
         stage_rms = _rms_level(stage_output)
         print()
         print("After AGC chain:")
-        print(f"  RMS:  {stage_rms:.6f} ({_dbfs(stage_rms):.2f} dBFS)")
+        print(f"  RMS:  {stage_rms:.8f} ({_dbfs(stage_rms):.2f} dBFS)")
         print(f"  Gain vs input: {_dbfs(stage_rms) - _dbfs(input_rms_level):.2f} dB")
 
     final_rms = _rms_level(stage_output)
     print()
     print("Final output:")
-    print(f"  RMS:  {final_rms:.6f} ({_dbfs(final_rms):.2f} dBFS)")
+    print(f"  RMS:  {final_rms:.8f} ({_dbfs(final_rms):.2f} dBFS)")
     print(f"  Total gain vs input: {_dbfs(final_rms) - _dbfs(input_rms_level):.2f} dB")
 
 
