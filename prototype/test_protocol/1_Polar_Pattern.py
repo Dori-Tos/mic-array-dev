@@ -222,7 +222,11 @@ def test_polar_pattern(
     print(f"{'='*70}")
     print(f"  Audio device: {device_name} (index {device_index})")
     print(f"  Sample rate: {sample_rate} Hz")
-    print(f"  Channels: {num_channels} (array-based beamforming)")
+    if use_pipeline:
+        print(f"  Channels: {num_channels} microphones (indices {mic_channel_numbers})")
+        print(f"  Capture: {actual_capture_channels} physical channels (to cover all microphone indices)")
+    else:
+        print(f"  Channels: 1 (raw passthrough)")
     print(f"  Gain input reference: {gain_input_reference}")
     print(f"  Number of passes: {num_passes}")
     if quarter_rotation:
@@ -327,6 +331,17 @@ def test_polar_pattern(
             num_mics = 4
             mic_channel_numbers = [2, 3, 8, 9] 
         
+        # Calculate actual capture channels needed (max index + 1, to include all channels up to the highest used)
+        actual_capture_channels = max(mic_channel_numbers) + 1 if mic_channel_numbers else num_channels
+        
+        # Validate device has enough channels
+        if max_input_channels < actual_capture_channels:
+            raise ValueError(
+                f"Selected input device supports only {max_input_channels} input channels, "
+                f"but geometry requires channels up to index {max(mic_channel_numbers)} (need {actual_capture_channels} total). "
+                "Lower --geometry or choose a different --device."
+            )
+        
         geometry_path = _resolve_geometry_path(int(geometry))
         print(f"  Using geometry file: {geometry_path.name}")
         mic_positions = MVDRBeamformer.load_positions_from_xml(str(geometry_path))
@@ -353,7 +368,7 @@ def test_polar_pattern(
                 logger=logger,
                 sample_rate=sample_rate,
                 low_cutoff=300.0,
-                high_cutoff=4000.0,
+                high_cutoff=6000.0,
                 order=4
             ),
         ]
@@ -497,7 +512,7 @@ def test_polar_pattern(
         settling_audio = sd.rec(
             settling_samples,
             samplerate=sample_rate,
-            channels=num_channels,
+            channels=actual_capture_channels,
             device=device_index,
             dtype='float32',
             blocking=True,
@@ -586,7 +601,7 @@ def test_polar_pattern(
                             audio_data = sd.rec(
                                 capture_samples,
                                 samplerate=sample_rate,
-                                channels=num_channels,
+                                channels=actual_capture_channels,
                                 device=device_index,
                                 dtype='float32',
                                 blocking=True,
