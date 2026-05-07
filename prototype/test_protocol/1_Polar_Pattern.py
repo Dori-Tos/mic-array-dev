@@ -222,11 +222,6 @@ def test_polar_pattern(
     print(f"{'='*70}")
     print(f"  Audio device: {device_name} (index {device_index})")
     print(f"  Sample rate: {sample_rate} Hz")
-    if use_pipeline:
-        print(f"  Channels: {num_channels} microphones (indices {mic_channel_numbers})")
-        print(f"  Capture: {actual_capture_channels} physical channels (to cover all microphone indices)")
-    else:
-        print(f"  Channels: 1 (raw passthrough)")
     print(f"  Gain input reference: {gain_input_reference}")
     print(f"  Number of passes: {num_passes}")
     if quarter_rotation:
@@ -361,6 +356,7 @@ def test_polar_pattern(
             weight_smooth_alpha_max=0.82,
             snr_threshold_for_sharpening=2.0,
             backward_null_strength=0.9,
+            max_beamform_freq=8000.0,
         )
         
         filters: list[object] = [
