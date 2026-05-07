@@ -514,7 +514,7 @@ if __name__ == "__main__":
 	parser.add_argument("--no-coherence-suppression", action="store_true", help="Disable coherence-based output modulation")
 	parser.add_argument("--no-backward-null", action="store_true", help="Disable the 180-degree backward null constraint")
 	parser.add_argument("--no-output-crossfade", action="store_true", help="Disable beamformer output crossfade")
-	parser.add_argument("--max-beamform-freq", type=float, default=6000.0, help="Maximum frequency (Hz) to perform MVDR; higher bins bypass MVDR and use pass-through/DAS fallback (default: 6000)")
+	parser.add_argument("--max-beamform-freq", type=float, default=8000.0, help="Maximum frequency (Hz) to perform MVDR; higher bins bypass MVDR and use pass-through/DAS fallback (default: 6000)")
 
 	args = parser.parse_args()
 

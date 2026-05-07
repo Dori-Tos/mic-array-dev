@@ -94,6 +94,16 @@ def _as_float_series(series: pd.Series) -> np.ndarray:
 	return pd.to_numeric(series, errors="coerce").astype(float).to_numpy()
 
 
+def _close_xy_trace(angles: np.ndarray, values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+	"""Append the first sample to the end so the XY trace closes on itself.
+
+	This makes the circular measurement layout visible in a regular x-y plot.
+	"""
+	if angles.size == 0 or values.size == 0:
+		return angles, values
+	return np.concatenate([angles, angles[:1]]), np.concatenate([values, values[:1]])
+
+
 def _prepare_series(paths: list[Path], freqs_hz: list[float | None] | None) -> list[_CsvSeries]:
 	if freqs_hz is not None and len(freqs_hz) != len(paths):
 		raise ValueError("--freqs must have the same count as CSV files")
@@ -115,6 +125,9 @@ def plot_gain_vs_angle(
 	*,
 	angle_col: str | None = None,
 	gain_col: str | None = None,
+	doa_col: str | None = None,
+	split_plots: bool = False,
+	polar_min: float | None = None,
 	title: str | None = None,
 	save_path: Path | None = None,
 	show: bool = True,
@@ -122,36 +135,124 @@ def plot_gain_vs_angle(
 	df = _load_csv(csv_path)
 	angle_col = _detect_angle_column(df, angle_col)
 	gain_col = _detect_gain_column(df, gain_col)
+	doa_col = doa_col if doa_col is not None else ("doa_deg" if "doa_deg" in df.columns else None)
 
 	angles = _as_float_series(df[angle_col])
 	gains = _as_float_series(df[gain_col])
 	order = np.argsort(angles)
 	angles = angles[order]
 	gains = gains[order]
+	doa = _as_float_series(df[doa_col])[order] if doa_col is not None and doa_col in df.columns else None
 
 	freq = _parse_freq_from_text(csv_path.stem)
 	default_title = "Free beam gain vs angle"
 	if freq is not None:
 		default_title += f" ({freq:.0f} Hz)"
 
-	fig = plt.figure(figsize=(10, 5))
-	ax = fig.add_subplot(111)
-	ax.plot(angles, gains, marker="o", linewidth=2)
-	ax.set_xlabel("Signal Angle")
-	ax.set_xticks(angles, labels=angles.astype(int))
-	ax.set_ylabel("Gain (dB)")
-	ax.set_title(title or default_title)
-	ax.grid(True, alpha=0.3)
-	ax.set_xlim(float(np.nanmin(angles)), float(np.nanmax(angles)))
+	if split_plots:
+		fig = plt.figure(figsize=(12, 5.5))
+		ax_gain = fig.add_subplot(1, 2, 1, projection="polar")
+		ax_doa = fig.add_subplot(1, 2, 2)
 
-	# Optional: visualize DOA estimate (if present).
-	if "doa_deg" in df.columns:
-		doa = _as_float_series(df["doa_deg"])[order]
-		if np.isfinite(doa).any():
-			ax2 = ax.twinx()
-			ax2.plot(angles, doa, color="tab:orange", linestyle="--", marker="x", alpha=0.7)
-			ax2.axhline(0.0, color="0.75", linewidth=1.0, alpha=0.5, linestyle="-")
-			ax2.set_ylabel("Estimated Angle (doa)")
+		# Close polar trace so 345->0 is connected visually. Use closed arrays
+		# so the polar plot wraps correctly.
+		angles_closed, gains_closed = _close_xy_trace(angles, gains)
+		angles_rad = np.deg2rad(angles_closed)
+		ax_gain.plot(angles_rad, gains_closed, marker="o", linewidth=2)
+		# Apply optional radial minimum (zoom control)
+		if polar_min is not None:
+			try:
+				ax_gain.set_ylim(bottom=float(polar_min))
+			except Exception:
+				# Fallback for older matplotlib versions
+				ax_gain.set_rmin(float(polar_min))
+		# Annotate polar title with the maximum output level in dBFS (preferred),
+		# falling back to the relative gain if no absolute dBFS columns are present.
+		max_output_dbfs = None
+		for col in ("rms_dbfs_avgch", "rms_dbfs", "peak_dbfs", "input_rms_dbfs_avgch", "input_rms_dbfs"):
+			if col in df.columns:
+				vals = _as_float_series(df[col])
+				finite = vals[np.isfinite(vals)]
+				if finite.size:
+					max_output_dbfs = float(np.nanmax(finite))
+					break
+		if max_output_dbfs is not None and np.isfinite(max_output_dbfs):
+			ax_gain.set_title(f"Gain (polar) [{max_output_dbfs:.1f} dBFS]")
+		else:
+			# Fallback: show the maximum relative gain (dB) if dBFS isn't available
+			try:
+				max_rel_gain = float(np.nanmax(gains_closed))
+			except Exception:
+				max_rel_gain = None
+			if max_rel_gain is None or not np.isfinite(max_rel_gain):
+				ax_gain.set_title("Gain (polar)")
+			else:
+				ax_gain.set_title(f"Gain (polar) [{max_rel_gain:.1f} dB]")
+		ax_gain.set_theta_zero_location("N")
+		ax_gain.set_theta_direction(-1)
+		ax_gain.grid(True, alpha=0.3)
+		ax_gain.set_rlabel_position(135)
+
+		if doa is None or not np.isfinite(doa).any():
+			raise ValueError(
+				"split_plots=True requires a DOA column (expected 'doa_deg' by default)"
+			)
+
+		# For x-y: use evenly spaced x positions so spacing is constant, and
+		# place a duplicated marker for 0° at the new 360° position (not at 0).
+		n = len(angles)
+		x_pos = np.arange(n)
+		# Find 0° value (if present). We will add a duplicated 360° point at x_pos==n
+		zero_idx = None
+		for i, a in enumerate(angles):
+			if float(a) % 360.0 == 0.0:
+				zero_idx = i
+				break
+		if zero_idx is not None:
+			x_dup = n
+			y_dup = float(doa[zero_idx])
+			# Line plot across measured angles including the duplicated 360° point
+			x_line = np.concatenate([x_pos, [x_dup]])
+			y_line = np.concatenate([doa, [y_dup]])
+			ax_doa.plot(x_line, y_line, marker=None, linewidth=1.5, color="tab:orange")
+			# Plot markers including the duplicated endpoint so 360° is visible
+			ax_doa.plot(x_line, y_line, marker="o", linestyle="", color="tab:orange")
+			# Build xticks: labels are measured angles with an extra 360° label at the end
+			tick_positions = list(x_pos) + [x_dup]
+			tick_labels = [str(int(a)) for a in angles] + ["360"]
+			ax_doa.set_xticks(tick_positions)
+			ax_doa.set_xticklabels(tick_labels)
+		else:
+			# No 0° measurement: simple evenly-spaced line/markers and angle ticks
+			ax_doa.plot(x_pos, doa, marker="o", linewidth=1.5, color="tab:orange")
+			ax_doa.set_xticks(x_pos)
+			ax_doa.set_xticklabels([str(int(a)) for a in angles])
+		ax_doa.set_xlabel("Signal Angle (deg)")
+		ax_doa.set_ylabel("Estimated Angle (deg)")
+		ax_doa.set_title("DOA estimation vs Real Angle")
+		ax_doa.grid(True, alpha=0.3)
+		# Set x-limits to cover all positions (including duplicated 360 marker)
+		ax_doa.set_xlim(-0.5, n + 0.5)
+		ax_doa.set_ylim(-30, 30)
+		fig.suptitle(title or default_title)
+	else:
+		fig = plt.figure(figsize=(10, 5))
+		ax = fig.add_subplot(111)
+		ax.plot(angles, gains, marker="o", linewidth=2)
+		ax.set_xlabel("Signal Angle")
+		ax.set_xticks(angles, labels=angles.astype(int))
+		ax.set_ylabel("Gain (dB)")
+		ax.set_title(title or default_title)
+		ax.grid(True, alpha=0.3)
+		ax.set_xlim(float(np.nanmin(angles)), float(np.nanmax(angles)))
+
+		# Optional: visualize DOA estimate (if present).
+		if doa is not None:
+			if np.isfinite(doa).any():
+				ax2 = ax.twinx()
+				ax2.plot(angles, doa, color="tab:orange", linestyle="--", marker="x", alpha=0.7)
+				ax2.axhline(0.0, color="0.75", linewidth=1.0, alpha=0.5, linestyle="-")
+				ax2.set_ylabel("Estimated Angle (doa)")
 
 	fig.tight_layout()
 
@@ -271,6 +372,17 @@ def main(argv: list[str] | None = None) -> int:
 	)
 	parser.add_argument("--angle-col", type=str, default=None, help="Angle column to use (default: auto)")
 	parser.add_argument("--gain-col", type=str, default=None, help="Gain column to use (default: gain_db)")
+	parser.add_argument(
+		"--split-plots",
+		action="store_true",
+		help="In angle mode, show gain on a polar plot and DOA on a separate x-y plot",
+	)
+	parser.add_argument(
+		"--polar-min",
+		type=float,
+		default=None,
+		help="Minimum radial value for the polar gain plot (use to 'dezoom')",
+	)
 	parser.add_argument("--title", type=str, default=None, help="Optional plot title")
 	parser.add_argument("--no-show", action="store_true", help="Do not show an interactive window")
 	parser.add_argument("--no-save", action="store_true", help="Do not save the plot")
@@ -315,6 +427,9 @@ def main(argv: list[str] | None = None) -> int:
 			csv_paths[0],
 			angle_col=args.angle_col,
 			gain_col=args.gain_col,
+			doa_col="doa_deg",
+			split_plots=bool(args.split_plots),
+			polar_min=args.polar_min,
 			title=args.title,
 			save_path=out_path,
 			show=show,
