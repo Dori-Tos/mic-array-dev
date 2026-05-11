@@ -124,10 +124,10 @@ def _build_mode_components(
         mic_channel_numbers=mic_channel_numbers,
         sample_rate=sample_rate,
         mic_positions_m=mic_positions,
-        covariance_alpha=0.95,
-        diagonal_loading=0.15,
-        spectral_whitening_factor=0.12,
-        weight_smooth_alpha=0.72,
+        covariance_alpha = 0.7,  # Increased smoothing (was 0.9): slower covariance adaptation = less block jitter
+        diagonal_loading = 1e-3,
+        spectral_whitening_factor = 0.3,
+        weight_smooth_alpha = 0.88, 
         max_adaptive_loading_scale=4.0,
         coherence_suppression_strength=0.8,
         weight_smooth_alpha_min=0.45,
@@ -147,7 +147,7 @@ def _build_mode_components(
         local_search_radius_deg=9.0,
         periodic_full_scan_blocks=20,
     )
-    # doa_estimator.freeze(0.0)
+    doa_estimator.freeze(0.0)
 
     return {
         "mic_list": mic_list,
@@ -191,7 +191,7 @@ if __name__ == "__main__":
     doa_logger.setLevel(logging.DEBUG)
     
     beamformer_logger = logging.getLogger("Beamformer")
-    beamformer_logger.setLevel(logging.INFO)
+    beamformer_logger.setLevel(logging.DEBUG)
     
     echo_canceller_logger = logging.getLogger("EchoCanceller")
     echo_canceller_logger.setLevel(logging.INFO)
@@ -363,7 +363,7 @@ if __name__ == "__main__":
         codec=mode_cfg["codec"],
         monitor_gain=monitor_gain,
         output_mode=output_mode,
-        output_boundary_fade_ms=0.0,
+        output_boundary_fade_ms=0.0,  # Disabled: not the right fix. Real solution is beamformer stability.
         downsample_rate=downsample_rate,
         post_beamforming_block_ms=post_beamforming_block_ms,
         initial_silence_duration=2.0,  # Silence period for baseline learning (filter protects against corruption during onset)

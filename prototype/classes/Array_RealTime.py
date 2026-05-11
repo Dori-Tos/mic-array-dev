@@ -872,16 +872,22 @@ class Array_RealTime(Array):
                             # Hold this chunk until next arrives
                             self._output_prev_mono = mono_out
                         else:
-                            # Compute fade length
+                            # Compute fade length (capped at 15% of block size for minimal AGC modulation).
+                            # Use Hann window for energy conservation (COLA property).
                             if self._output_fade_samples <= 0:
                                 fade_n = 0
                             else:
-                                fade_n = int(min(self._output_fade_samples, prev.size, mono_out.size, max(1, prev.size // 2), max(1, mono_out.size // 2)))
+                                # Cap fade to 15% of block, not 50%, to avoid excessive modulation
+                                max_fade_block_pct = int(0.15 * min(prev.size, mono_out.size))
+                                fade_n = int(min(self._output_fade_samples, max_fade_block_pct))
+                                fade_n = max(1, fade_n) if fade_n > 0 else 0
 
                             if fade_n > 0:
-                                t = np.linspace(0.0, 1.0, fade_n, dtype=np.float32)
-                                fade_in = np.sin(0.5 * np.pi * t)
-                                fade_out = np.cos(0.5 * np.pi * t)
+                                # Use Hann window for energy-conserving overlap-add (COLA property).
+                                # Hann window: both halves sum to ~1.0 at the seam, no energy peak.
+                                hann_window = np.hanning(fade_n * 2).astype(np.float32)
+                                fade_out = hann_window[:fade_n]  # Fade from 1 to 0
+                                fade_in = hann_window[fade_n:]   # Fade from 0 to 1
 
                                 combined = prev.copy()
                                 combined[-fade_n:] = combined[-fade_n:] * fade_out + mono_out[:fade_n] * fade_in
