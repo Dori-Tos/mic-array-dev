@@ -325,6 +325,9 @@ def test_polar_pattern(
         elif geometry == 4:
             num_mics = 4
             mic_channel_numbers = [2, 3, 8, 9] 
+        elif geometry == 5:
+            num_mics = 14
+            mic_channel_numbers = list(range(int(num_mics)))
         
         # Calculate actual capture channels needed (max index + 1, to include all channels up to the highest used)
         actual_capture_channels = max(mic_channel_numbers) + 1 if mic_channel_numbers else num_channels

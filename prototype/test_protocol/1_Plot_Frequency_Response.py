@@ -30,22 +30,18 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-PATTERN = 1
+PATTERN = 3
 
 if PATTERN == 1:
     BASE_PATH = Path("Python/Tests/mic-array-dev/data/test_protocol/1_polar_pattern/1_square_70dB")
     DEFAULT_FILES = [
-        Path("polar_pattern_300_Hz_60cm.csv"),
-        Path("polar_pattern_500_Hz_60cm.csv"),
-        Path("polar_pattern_1000_Hz_60cm.csv"),
-        Path("polar_pattern_1500_Hz_60cm.csv"),
-        Path("polar_pattern_2000_Hz_60cm.csv"),
-        Path("polar_pattern_2500_Hz_60cm.csv"),
-        Path("polar_pattern_3000_Hz_60cm.csv"),
-        Path("polar_pattern_3500_Hz_60cm.csv"),
-        Path("polar_pattern_4000_Hz_60cm.csv"),
-        Path("polar_pattern_4500_Hz_60cm.csv"),    
-        Path("polar_pattern_5000_Hz_60cm.csv"),    
+        Path("polar_pattern_300_Hz_60cm_2.csv"),
+        Path("polar_pattern_1500_Hz_60cm_2.csv"),
+        Path("polar_pattern_2500_Hz_60cm_2.csv"),
+        Path("polar_pattern_3500_Hz_60cm_2.csv"),
+        Path("polar_pattern_4500_Hz_60cm_2.csv"),    
+        Path("polar_pattern_5000_Hz_60cm_2.csv"),    
+        Path("polar_pattern_6000_Hz_60cm_2.csv"),    
     ]
 elif PATTERN == 2:
     BASE_PATH = Path("Python/Tests/mic-array-dev/data/test_protocol/1_polar_pattern/2_corners_70dB")
@@ -55,12 +51,13 @@ elif PATTERN == 2:
         Path("polar_pattern_1000_Hz.csv"),
         Path("polar_pattern_1500_Hz.csv"),
         Path("polar_pattern_2000_Hz.csv"),
-        Path("polar_pattern_2500_Hz_40cm.csv"),
-        Path("polar_pattern_3000_Hz_40cm.csv"),
-        Path("polar_pattern_3500_Hz_40cm.csv"),
-        Path("polar_pattern_4000_Hz_40cm.csv"),
-        Path("polar_pattern_4500_Hz_60cm.csv"),   
-        Path("polar_pattern_5000_Hz_60cm.csv"),     
+        Path("polar_pattern_2500_Hz_60cm.csv"),
+        Path("polar_pattern_3000_Hz_60cm.csv"),
+        Path("polar_pattern_3500_Hz_60cm.csv"),
+        Path("polar_pattern_4000_Hz_60cm.csv"),
+        Path("polar_pattern_4500_Hz_60cm_2.csv"),   
+        Path("polar_pattern_5000_Hz_60cm_2.csv"),    
+        Path("polar_pattern_6000_Hz_60cm_2.csv"),     
     ]
 elif PATTERN == 3:
     BASE_PATH = Path("Python/Tests/mic-array-dev/data/test_protocol/1_polar_pattern/3_rim_70dB")
@@ -73,9 +70,10 @@ elif PATTERN == 3:
         Path("polar_pattern_2500_Hz_60cm.csv"),
         Path("polar_pattern_3000_Hz_60cm.csv"),
         Path("polar_pattern_3500_Hz_60cm.csv"),
-        Path("polar_pattern_4000_Hz_60cm.csv"),
-        Path("polar_pattern_4500_Hz_60cm.csv"),      
-        Path("polar_pattern_5000_Hz_60cm.csv"),  
+        Path("polar_pattern_4000_Hz_60cm_2.csv"),
+        Path("polar_pattern_4500_Hz_60cm_2.csv"),      
+        Path("polar_pattern_5000_Hz_60cm_2.csv"),     
+        Path("polar_pattern_6000_Hz_60cm_2.csv"), 
     ]
 elif PATTERN == 4:
     BASE_PATH = Path("Python/Tests/mic-array-dev/data/test_protocol/1_polar_pattern/4_single_corner_70dB")
@@ -89,8 +87,9 @@ elif PATTERN == 4:
         Path("polar_pattern_3000_Hz_60cm.csv"),
         Path("polar_pattern_3500_Hz_60cm.csv"),
         Path("polar_pattern_4000_Hz_60cm.csv"),
-        Path("polar_pattern_4500_Hz_60cm.csv"),      
-        Path("polar_pattern_5000_Hz_60cm.csv"),  
+        Path("polar_pattern_4500_Hz_60cm_2.csv"),      
+        Path("polar_pattern_5000_Hz_60cm_2.csv"),        
+        Path("polar_pattern_6000_Hz_60cm_2.csv"),
     ]
 
 ANGLES = [0, 180]

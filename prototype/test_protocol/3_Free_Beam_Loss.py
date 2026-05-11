@@ -250,6 +250,10 @@ def test_free_beam(
             pattern = "4_Single_Corner.xml"
             mic_channel_numbers = [2, 3, 8, 9]
             
+        elif pattern == 5:
+            pattern = "5_Max_Rim.xml"
+            mic_channel_numbers = list(range(14))
+            
         else:
             raise ValueError(f"Invalid pattern value: {pattern}. Must be 1, 2, 3, or 4.")
         

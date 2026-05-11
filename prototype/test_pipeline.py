@@ -169,9 +169,12 @@ if __name__ == "__main__":
     monitor_gain = 0.22
     
     """
-    With 4 mics => Beamforming = 4-5ms | DOA = 0.5-2ms
-    With 8 mics => Beamforming = 11-15ms | DOA = 0.5-4ms
-    with 10 mics => Beamforming = 13-16ms | DOA = 0.5-5ms
+    After dividing the passband of the beamformer => Divided processing time by two:
+    
+    With 4 mics => Beamforming = 2-3ms | DOA = 0.5-2ms
+    With 8 mics => Beamforming = 4-6ms | DOA = 0.5-4ms
+    with 10 mics => Beamforming = 6-8ms | DOA = 0.5-5ms
+    with 14 mics => Beamforming = 8-11ms | DOA = 0.5-7ms
     
     With eigenvalue suppression and frequency smoothing: +2-4ms
     """
@@ -188,7 +191,7 @@ if __name__ == "__main__":
     doa_logger.setLevel(logging.DEBUG)
     
     beamformer_logger = logging.getLogger("Beamformer")
-    beamformer_logger.setLevel(logging.DEBUG)
+    beamformer_logger.setLevel(logging.INFO)
     
     echo_canceller_logger = logging.getLogger("EchoCanceller")
     echo_canceller_logger.setLevel(logging.INFO)
@@ -217,7 +220,7 @@ if __name__ == "__main__":
     agc_logger.addHandler(console_handler)
     codec_logger.addHandler(console_handler)
 
-    geometry = 2
+    geometry = 5
     
     if geometry == 1:
         geometry_path = "1_Square.xml"
@@ -231,6 +234,9 @@ if __name__ == "__main__":
     elif geometry == 4:
         geometry_path = "4_Single_Corner.xml"
         mic_channel_numbers = [2, 3, 8, 9]
+    elif geometry == 5:
+        geometry_path = "5_Max_Rim.xml"
+        mic_channel_numbers = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
     else:
         raise ValueError("Invalid geometry selection")
 
