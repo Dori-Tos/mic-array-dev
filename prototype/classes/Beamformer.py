@@ -778,6 +778,14 @@ class MVDRBeamformer(Beamformer):
         )
         spectrum_proc = spectrum_normalized[process_mask]  # Use phase-only if enabled
         steering_proc = steering[process_mask]
+        
+        # PHASE-ONLY STEERING: Also normalize steering vector to unit magnitude for purely phase-based weights.
+        # This makes MVDR weights depend ONLY on phase relationships, removing magnitude variations from steering.
+        # Increases phase-focus even further while preserving output dynamics by applying weights to original spectrum.
+        if self.enable_phase_only_beamforming:
+            steering_mag = np.abs(steering_proc) + self._eps
+            steering_proc = steering_proc / steering_mag  # Unit magnitude steering vector
+        
         block_snr_ratio = self._compute_block_snr_estimate(spectrum[process_mask]) if need_snr_estimate else 1.0  # SNR from original for accuracy
 
         # Update covariance only for processed bins.
