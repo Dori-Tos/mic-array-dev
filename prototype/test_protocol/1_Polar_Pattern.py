@@ -116,6 +116,7 @@ def test_polar_pattern(
     num_mics=8,
     geometry=2,
     gain_input_reference='mean',
+    phase_only_beamforming=False,
 ):
     """
     Measure microphone array polar pattern using the complete processing pipeline.
@@ -162,10 +163,11 @@ def test_polar_pattern(
         num_mics: Number of microphones to use for beamforming (default: 8).
         geometry: Geometry selector using XML filename prefix before '_'.
               Example: geometry=2 selects files like '2_*.xml'.
-          gain_input_reference: Input reference used for gain denominator.
+        gain_input_reference: Input reference used for gain denominator.
               'mean' (default) uses RMS mean across captured channels,
               'median' uses RMS median across channels,
               'ch0' preserves legacy first-channel behavior.
+        phase_only_beamforming: If True, enable phase-only beamforming (default: False).
     
     Returns:
         DataFrame with averaged measurements
@@ -349,6 +351,7 @@ def test_polar_pattern(
             mic_channel_numbers=mic_channel_numbers,
             sample_rate=sample_rate,
             mic_positions_m=mic_positions,
+            enable_phase_only_beamforming=bool(phase_only_beamforming),
         )
         
         filters: list[object] = [
@@ -874,6 +877,8 @@ if __name__ == '__main__':
                             "'median' uses RMS median across channels, "
                             "'ch0' preserves legacy first-channel behavior."
                         ))
+    parser.add_argument('--phase-only-beamforming', action=argparse.BooleanOptionalAction, default=False,
+                        help='Use phase-only MVDR beamforming without amplitude optimization (default: disabled)')
     
     args = parser.parse_args()
     
@@ -919,6 +924,7 @@ if __name__ == '__main__':
         num_mics=args.num_mics,
         geometry=args.geometry,
         gain_input_reference=args.gain_input_reference,
+        phase_only_beamforming=args.phase_only_beamforming,
     )
     
     # Usage examples:

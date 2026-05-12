@@ -139,6 +139,7 @@ def test_free_beam(
     process_block_ms=20.0,
     doa_min_confidence_db: float | None = 1.0,
     reset_doa_each_capture: bool = False,
+    phase_only_beamforming=False,
 ):
     """
     Measure signal strength at a fixed set of angles with automatic DOA-based beamforming.
@@ -265,6 +266,7 @@ def test_free_beam(
             mic_channel_numbers=mic_channel_numbers,
             sample_rate=sample_rate,
             mic_positions_m=mic_positions,
+            enable_phase_only_beamforming=bool(phase_only_beamforming),
         )
         
         das_beamformer=DASBeamformer(
@@ -743,7 +745,9 @@ if __name__ == '__main__':
                         help='Enable spectral subtraction filter (default: enabled)')
     parser.add_argument('--save-on-interrupt', action=argparse.BooleanOptionalAction, default=False,
                         help='Save partial data when interrupted by Ctrl+C (default: disabled)')
-    
+    parser.add_argument('--phase-only-beamforming', action='store_true',
+                        help='Use phase-only beamforming (disable amplitude weights) for a more diffuse response pattern
+                        
     args = parser.parse_args()
 
     angle_list = _parse_angle_list(args.angles)
@@ -766,6 +770,7 @@ if __name__ == '__main__':
         process_block_ms=args.process_block_ms,
         doa_min_confidence_db=(None if float(args.doa_min_confidence_db) <= 0.0 else float(args.doa_min_confidence_db)),
         reset_doa_each_capture=bool(args.reset_doa_each_capture),
+        phase_only_beamforming=bool(args.phase_only_beamforming),
     )
     
     # Usage examples:

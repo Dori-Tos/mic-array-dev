@@ -321,6 +321,7 @@ class MVDRBeamformer(Beamformer):
         crossfade_energy_threshold: float = 1e-5,
         crossfade_accumulation_ms: float = 200.0,
         crossfade_hold_ms: float = 150.0,
+        enable_phase_only_beamforming: bool = False,
     ):
         super().__init__(
             logger=logger,
@@ -370,6 +371,7 @@ class MVDRBeamformer(Beamformer):
         self.backward_null_strength = float(backward_null_strength)  # Null suppression at 180°
         self.enable_backward_null_constraint = bool(enable_backward_null_constraint)
         self.enable_output_crossfade = bool(enable_output_crossfade)
+        self.enable_phase_only_beamforming = bool(enable_phase_only_beamforming)
         # If <= 0 or None, masked beamforming is disabled (process all bins)
         if max_beamform_freq is None:
             self.max_beamform_freq = None
@@ -759,15 +761,24 @@ class MVDRBeamformer(Beamformer):
         if not np.any(process_mask):
             return np.fft.irfft(output_spectrum, n=n_samples).astype(np.float64, copy=False)
 
+        # PHASE-ONLY BEAMFORMING: Normalize spectrum to unit magnitude to focus on phase relationships.
+        # This removes gain mismatches and makes MVDR weights depend purely on phase alignment,
+        # which is more stable for small arrays and improves robustness to mic sensitivity variations.
+        if self.enable_phase_only_beamforming:
+            spectrum_mag = np.abs(spectrum) + self._eps
+            spectrum_normalized = spectrum / spectrum_mag  # Unit magnitude, preserve phase
+        else:
+            spectrum_normalized = spectrum
+
         # Compute SNR estimate only when a stage actually needs it.
         need_snr_estimate = (
             self.enable_adaptive_loading
             or self.enable_weight_smoothing
             or self.enable_eigenvalue_suppression
         )
-        spectrum_proc = spectrum[process_mask]
+        spectrum_proc = spectrum_normalized[process_mask]  # Use phase-only if enabled
         steering_proc = steering[process_mask]
-        block_snr_ratio = self._compute_block_snr_estimate(spectrum_proc) if need_snr_estimate else 1.0
+        block_snr_ratio = self._compute_block_snr_estimate(spectrum[process_mask]) if need_snr_estimate else 1.0  # SNR from original for accuracy
 
         # Update covariance only for processed bins.
         r_inst_proc = spectrum_proc[:, :, None] * np.conj(spectrum_proc[:, None, :])
@@ -867,9 +878,10 @@ class MVDRBeamformer(Beamformer):
 
         # COHERENCE-BASED SIDELOBE SUPPRESSION: Suppress diffuse noise while preserving main source
         # Compute inter-channel coherence (0=diffuse, 1=coherent point-source)
-        output_spectrum[process_mask] = np.einsum("fi,fi->f", np.conj(weights[process_mask]), spectrum_proc, optimize=True)
+        # Use ORIGINAL spectrum for final output (preserve magnitude dynamics), not phase-only
+        output_spectrum[process_mask] = np.einsum("fi,fi->f", np.conj(weights[process_mask]), spectrum[process_mask], optimize=True)
         if self.enable_coherence_suppression:
-            coherence = self._compute_coherence_strength(spectrum_proc)  # Shape: (processed_bins,)
+            coherence = self._compute_coherence_strength(spectrum[process_mask])  # Compute from original for better SNR assessment
             
             # Apply user-controlled suppression strength to coherence gain
             # suppression_strength = 0.0: No suppression, pure MVDR

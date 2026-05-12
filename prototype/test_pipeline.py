@@ -135,6 +135,7 @@ def _build_mode_components(
         snr_threshold_for_sharpening=2.0,
         backward_null_strength=0.6,
         max_beamform_freq=8000.0,
+        enable_phase_only_beamforming=True,  # Prioritize phase relationships over magnitude
     )
 
     doa_estimator = IterativeDOAEstimator(
