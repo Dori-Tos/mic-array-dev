@@ -421,6 +421,14 @@ class MVDRBeamformer(Beamformer):
         self._defer_transition_until_prev_weights: bool = False
         self._transition_log_interval = 1.0
         self._last_transition_log_time = 0.0
+        
+        # STFT overlap-add state for phase-continuous beamforming across blocks.
+        # Uses 25% overlap (hop=240 at 48kHz) with multiple Hann windows for smoother reconstruction.
+        # Maintains phase continuity and eliminates block-boundary discontinuities.
+        self._stft_hop_size = 240  # 25% of 960-sample block at 48 kHz (4 overlaps per block)
+        self._stft_input_buffer: np.ndarray | None = None  # Previous 3 hops of input (720 samples)
+        self._stft_output_buffer: np.ndarray | None = None  # Previous 3 hops of output (720 samples)
+        self._stft_window: np.ndarray | None = None  # Pre-computed window
 
     def reset(self):
         self._covariance = None
@@ -441,6 +449,10 @@ class MVDRBeamformer(Beamformer):
         self._transition_blocks_left = 0
         self._in_transition: bool = False
         self._in_transition = False
+        # Reset STFT state
+        self._stft_input_buffer = None
+        self._stft_output_buffer = None
+        self._stft_window = None
     
     def get_last_coherence(self) -> np.ndarray | None:
         """
@@ -868,6 +880,105 @@ class MVDRBeamformer(Beamformer):
 
         return np.fft.irfft(output_spectrum, n=n_samples).astype(np.float64, copy=False)
 
+    def _apply_stft_overlap_add(self, block: np.ndarray, theta_deg: float) -> np.ndarray:
+        """
+        Apply STFT overlap-add processing for phase-continuous beamforming.
+        
+        Uses 25% overlap (240-sample hops) with Hann windowing to maintain phase continuity
+        across block boundaries and eliminate discontinuities through multiple overlapped frames.
+        
+        Framing scheme with 25% overlap:
+        - 4 overlapping 960-sample frames per 960-sample output block
+        - Each frame processes differently, creating smoother output
+        - Hann windows provide smooth transitions between overlaps
+        
+        Input: Multi-channel block (n_samples, num_channels)  e.g., (960, 14)
+        Output: Mono beamformed output (n_samples,)  e.g., (960,)
+        
+        :param block: Input block (960 samples × 14 channels at 48 kHz)
+        :param theta_deg: Steering angle in degrees
+        :return: Output block (960 samples mono, smoothed with multiple overlaps)
+        """
+        hop_size = self._stft_hop_size  # 240 samples
+        block_size = block.shape[0]  # Should be 960
+        num_channels = block.shape[1]  # Should be 14
+        
+        # Initialize buffers if needed
+        # With 25% overlap and 960-sample outputs, we need to buffer 720 samples from previous block
+        if self._stft_input_buffer is None:
+            self._stft_input_buffer = np.zeros((3 * hop_size, num_channels), dtype=np.float64)  # 720 samples
+        if self._stft_output_buffer is None:
+            self._stft_output_buffer = np.zeros(3 * hop_size, dtype=np.float64)  # 720 samples mono
+        
+        block_arr = np.asarray(block, dtype=np.float64)
+        
+        # Create overlapped input frame for first output hop:
+        # [previous_3_hops (720×14), current_block (960×14)] = (1680, 14)
+        frame_in_full = np.concatenate([self._stft_input_buffer, block_arr], axis=0)
+        frame_len_full = frame_in_full.shape[0]  # 1680
+        
+        # Pre-compute Hann window for full frame (size 1680)
+        if self._stft_window is None or self._stft_window.size != frame_len_full:
+            self._stft_window = np.hanning(frame_len_full).astype(np.float64)
+        
+        # Process full frame with windowing
+        frame_windowed = frame_in_full * self._stft_window[:, None]
+        frame_output_full = self.process(frame_windowed, theta_deg)
+        frame_output_full = np.asarray(frame_output_full, dtype=np.float64)
+        
+        # Extract output hops (each 240 samples):
+        # output[0:240], output[240:480], output[480:720], output[720:960]
+        output_hops = []
+        for i in range(4):
+            start_idx = i * hop_size
+            end_idx = start_idx + hop_size
+            output_hops.append(frame_output_full[start_idx:end_idx])
+        
+        # Overlap-add reconstruction with previous output hops
+        # Previous block saved 3 output hops (720 samples) for this block to use
+        reconstructed_hops = []
+        
+        # First hop: overlaps with previous block's last hop
+        reconstructed_hops.append(self._stft_output_buffer[:hop_size] + output_hops[0])
+        
+        # Remaining hops: use directly (they'll have overlap with next block)
+        reconstructed_hops.extend(output_hops[1:])
+        
+        # Concatenate all hops to get 960-sample output
+        output = np.concatenate(reconstructed_hops)
+
+        # Normalize overlap-add by the summed Hann window contributions to correct
+        # amplitude/timbre modulation introduced by windowing + beamformer processing.
+        # Build denominator vector from the analysis Hann window pieces.
+        w = self._stft_window
+        eps = 1e-12
+        # Window indices mapping for current frame (length = frame_len_full = 1680)
+        # current hops: w[0:240], w[240:480], w[480:720], w[720:960]
+        # previous last hop: w[960:1200]
+        prev_win = w[960:960 + hop_size]
+        hop0 = w[0:hop_size]
+        hop1 = w[hop_size:2 * hop_size]
+        hop2 = w[2 * hop_size:3 * hop_size]
+        hop3 = w[3 * hop_size:4 * hop_size]
+
+        denom = np.empty(output.shape[0], dtype=np.float64)
+        denom[0:hop_size] = prev_win + hop0
+        denom[hop_size:2 * hop_size] = hop1
+        denom[2 * hop_size:3 * hop_size] = hop2
+        denom[3 * hop_size:4 * hop_size] = hop3
+
+        # Avoid division by zero
+        denom = np.where(denom < eps, eps, denom)
+        output = output / denom
+
+        # Save state for next block
+        # Store last 720 samples of input (3 hops) for next iteration
+        self._stft_input_buffer = np.asarray(block_arr[-3*hop_size:, :], dtype=np.float64)
+        # Store last 3 output hops (720 samples) for next iteration's overlap-add
+        self._stft_output_buffer = np.concatenate(output_hops[1:])
+
+        return output
+
     def apply(self, block: np.ndarray, theta_deg: float | None = None) -> np.ndarray:
         current_log_time = time.monotonic()
         beam_start = time.perf_counter()
@@ -963,7 +1074,8 @@ class MVDRBeamformer(Beamformer):
                     self._transition_blocks_total = 0
                     self._in_transition = False
 
-        result = self.process(block, effective_angle)
+        # Use STFT overlap-add for phase-continuous output instead of raw per-block processing
+        result = self._apply_stft_overlap_add(block, effective_angle)
         output_arr = np.asarray(result, dtype=np.float64)
         # Keep the last requested angle so the next block can detect changes.
         self._blend_accumulated_angle = 0.0
