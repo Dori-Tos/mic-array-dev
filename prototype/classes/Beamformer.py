@@ -794,12 +794,16 @@ class MVDRBeamformer(Beamformer):
         # Store current covariance for next block
         self._prev_covariance = self._covariance.copy()
 
-        # Robust, frequency-dependent loading.
+        # Robust, frequency-dependent loading with angle-dependent stabilization.
+        # At edge angles (±25°), increase diagonal loading to handle DOA errors and instability.
+        angle_loading_multiplier = self._compute_angle_dependent_diagonal_loading(theta_deg)
+        adjusted_diagonal_loading = self.diagonal_loading * angle_loading_multiplier
+        
         trace_r = np.real(np.trace(self._covariance[process_mask], axis1=1, axis2=2))
-        base_loading = self.diagonal_loading * (trace_r / self.channel_count + self._eps)
+        base_loading = adjusted_diagonal_loading * (trace_r / self.channel_count + self._eps)
         if self.enable_adaptive_loading:
             inv_snr = np.clip(1.0 / (block_snr_ratio + self._eps), 0.0, self.max_adaptive_loading_scale)
-            adaptive_loading = self.diagonal_loading * (1.0 + self.spectral_whitening_factor * inv_snr)
+            adaptive_loading = adjusted_diagonal_loading * (1.0 + self.spectral_whitening_factor * inv_snr)
         else:
             adaptive_loading = 0.0
         total_loading = base_loading + adaptive_loading
@@ -937,6 +941,32 @@ class MVDRBeamformer(Beamformer):
         adj_alpha_max = np.clip(adj_alpha_center + range_width * 0.5, 0.0, 1.0)
         
         return float(adj_cov_alpha), float(adj_alpha_min), float(adj_alpha_max), float(adj_alpha_center)
+
+    def _compute_angle_dependent_diagonal_loading(self, theta_deg: float) -> float:
+        """
+        Compute angle-dependent diagonal loading multiplier to stabilize MVDR at edge angles.
+        
+        Higher loading at edge angles (±25°) makes the covariance matrix inversion more robust
+        when steering is uncertain. At front (0°), use normal loading. At edges (±25°),
+        apply strong regularization to dampen oscillations from DOA estimation errors.
+        
+        :param theta_deg: Steering angle in degrees
+        :return: Multiplier to scale diagonal_loading (1.0 at front, 5-8x at edges)
+        """
+        abs_angle = np.abs(float(theta_deg))
+        
+        # Front (0°): normal loading multiplier
+        front_multiplier = 1.0
+        # Edges (±25°): strong regularization to handle DOA errors and instability
+        edge_multiplier = 12.0
+        
+        # Normalize angle to [0, 1]: t=0 at 0°, t=1 at ±25°
+        t = np.clip(abs_angle / 25.0, 0.0, 1.0)
+        
+        # Linear interpolation for smooth transition
+        multiplier = front_multiplier + (edge_multiplier - front_multiplier) * t
+        
+        return float(multiplier)
 
     def apply(self, block: np.ndarray, theta_deg: float | None = None) -> np.ndarray:
         current_log_time = time.monotonic()
