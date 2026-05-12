@@ -124,16 +124,16 @@ def _build_mode_components(
         mic_channel_numbers=mic_channel_numbers,
         sample_rate=sample_rate,
         mic_positions_m=mic_positions,
-        covariance_alpha = 0.7,  # Increased smoothing (was 0.9): slower covariance adaptation = less block jitter
-        diagonal_loading = 1e-3,
+        covariance_alpha = 0.7,
+        diagonal_loading = 0.01,
         spectral_whitening_factor = 0.3,
-        weight_smooth_alpha = 0.88, 
+        weight_smooth_alpha = 0.8, 
         max_adaptive_loading_scale=4.0,
         coherence_suppression_strength=0.8,
         weight_smooth_alpha_min=0.45,
         weight_smooth_alpha_max=0.82,
         snr_threshold_for_sharpening=2.0,
-        backward_null_strength=0.9,
+        backward_null_strength=0.8,
     )
 
     doa_estimator = IterativeDOAEstimator(
@@ -147,7 +147,7 @@ def _build_mode_components(
         local_search_radius_deg=9.0,
         periodic_full_scan_blocks=20,
     )
-    doa_estimator.freeze(0.0)
+    # doa_estimator.freeze(0.0)
 
     return {
         "mic_list": mic_list,

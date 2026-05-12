@@ -354,6 +354,7 @@ class MVDRBeamformer(Beamformer):
         self.covariance_alpha = float(covariance_alpha)
         self.diagonal_loading = float(diagonal_loading)
         self.spectral_whitening_factor = float(spectral_whitening_factor)
+        self.weight_smooth_alpha = float(weight_smooth_alpha)  # Current smoothing alpha (can be adjusted per-block)
         self.weight_smooth_alpha_fixed = float(weight_smooth_alpha)  # Keep original for reference
         self.weight_smooth_alpha_min = float(weight_smooth_alpha_min)  # Sharp main lobe (steady state)
         self.weight_smooth_alpha_max = float(weight_smooth_alpha_max)  # Stable (noisy conditions)
@@ -392,6 +393,14 @@ class MVDRBeamformer(Beamformer):
         # Output-level crossfading for steering angle transitions (blend block outputs, not beamformer states)
         self._prev_output: np.ndarray | None = None  # Previous block's beamformed output for blending
         self._prev_steering_angle_for_blend: float | None = None  # Steering angle of previous block
+        
+        # Output-domain IIR smoothing to catch block-boundary discontinuities
+        self._iir_state: float = 0.0  # Previous sample for one-pole IIR filter
+        self._output_iir_alpha: float = 0.7  # IIR filter pole; higher = more smoothing, lower = more responsiveness
+        
+        # Cross-block covariance temporal smoothing to reduce sudden weight jumps
+        self._prev_covariance: np.ndarray | None = None  # Store covariance from previous block
+        self._covariance_cross_block_alpha: float = 0.3  # Blend new covariance with previous; 0=full new, 1=full old
         # Crossfade tuning
         self.crossfade_base_samples = int(crossfade_base_samples)
         self.crossfade_min_samples = int(crossfade_min_samples)
@@ -773,6 +782,17 @@ class MVDRBeamformer(Beamformer):
             self.covariance_alpha * self._covariance[process_mask]
             + (1.0 - self.covariance_alpha) * r_inst_proc
         )
+        
+        # CROSS-BLOCK COVARIANCE SMOOTHING: Reduce sudden weight jumps at block boundaries.
+        # Blend current covariance with previous block's covariance to smooth out discontinuities
+        # caused by per-block FFT independence. This adds latency (~1 block) but stabilizes MVDR weights.
+        if self._prev_covariance is not None and self._prev_covariance.shape == self._covariance.shape:
+            self._covariance = (
+                (1.0 - self._covariance_cross_block_alpha) * self._covariance
+                + self._covariance_cross_block_alpha * self._prev_covariance
+            )
+        # Store current covariance for next block
+        self._prev_covariance = self._covariance.copy()
 
         # Robust, frequency-dependent loading.
         trace_r = np.real(np.trace(self._covariance[process_mask], axis1=1, axis2=2))
@@ -866,7 +886,57 @@ class MVDRBeamformer(Beamformer):
         else:
             self._last_coherence = np.ones(freq_bins, dtype=np.float64)
 
-        return np.fft.irfft(output_spectrum, n=n_samples).astype(np.float64, copy=False)
+        # Compute final time-domain output
+        output = np.fft.irfft(output_spectrum, n=n_samples).astype(np.float64, copy=False)
+        
+        # OUTPUT-DOMAIN IIR SMOOTHING: One-pole low-pass filter on final output to catch
+        # block-to-block discontinuities that weight smoothing misses. This is phase-neutral
+        # and won't cause roboticism like windowed FFT overlap-add.
+        # y[n] = alpha * x[n] + (1 - alpha) * y[n-1]
+        # where _iir_state holds y[n-1] from the previous sample
+        filtered_output = np.empty_like(output)
+        for i in range(n_samples):
+            filtered_output[i] = self._output_iir_alpha * output[i] + (1.0 - self._output_iir_alpha) * self._iir_state
+            self._iir_state = filtered_output[i]
+        
+        return filtered_output
+
+    def _compute_angle_dependent_alphas(self, theta_deg: float) -> tuple[float, float, float, float]:
+        """
+        Compute angle-dependent smoothing parameters to reduce side-angle artifacts.
+        
+        At front (0°): keep the current tuned smoothing
+        At edges (±25°): increase smoothing to stabilize block-to-block weight changes
+        Linearly interpolate between based on absolute steering angle.
+        
+        :param theta_deg: Steering angle in degrees
+        :return: Tuple (cov_alpha, alpha_min, alpha_max, alpha_center)
+        """
+        abs_angle = np.abs(float(theta_deg))
+        
+        # Covariance alpha parameters
+        front_cov_alpha = 0.75
+        edge_cov_alpha = 0.6
+        
+        # Weight smoothing center (higher at edges for stronger temporal smoothing)
+        front_alpha_center = self.weight_smooth_alpha_fixed
+        edge_alpha_center = 0.68
+        
+        # Normalize angle to [0, 1]: t=0 at 0°, t=1 at ±25°
+        t = np.clip(abs_angle / 25.0, 0.0, 1.0)
+        
+        # Linear interpolation for covariance alpha
+        adj_cov_alpha = front_cov_alpha + (edge_cov_alpha - front_cov_alpha) * t
+        
+        # Linear interpolation for weight smoothing center
+        adj_alpha_center = front_alpha_center + (edge_alpha_center - front_alpha_center) * t
+        
+        # Adjust min/max range around the center
+        range_width = self.weight_smooth_alpha_max - self.weight_smooth_alpha_min
+        adj_alpha_min = np.clip(adj_alpha_center - range_width * 0.5, 0.0, 1.0)
+        adj_alpha_max = np.clip(adj_alpha_center + range_width * 0.5, 0.0, 1.0)
+        
+        return float(adj_cov_alpha), float(adj_alpha_min), float(adj_alpha_max), float(adj_alpha_center)
 
     def apply(self, block: np.ndarray, theta_deg: float | None = None) -> np.ndarray:
         current_log_time = time.monotonic()
@@ -901,43 +971,19 @@ class MVDRBeamformer(Beamformer):
                             f"[MVDR] Deferring transition (no prev weights) {previous_angle!r}→{requested_angle!r}"
                         )
                 else:
-                    # If a transition is already running, smoothly retarget it instead
-                    if getattr(self, "_in_transition", False) and self._transition_start_angle is not None and self._transition_target_angle is not None and self._transition_blocks_total > 0:
-                        try:
-                            blocks_done = float(self._transition_blocks_total - self._transition_blocks_left)
-                            frac = min(max(blocks_done / float(self._transition_blocks_total), 0.0), 1.0)
-                            eased = 0.5 * (1.0 - np.cos(np.pi * frac))
-                            current_eff = float(self._transition_start_angle) + (float(self._transition_target_angle) - float(self._transition_start_angle)) * eased
-                        except Exception:
-                            current_eff = float(previous_angle)
-
-                        # Retarget from current effective angle toward the new requested angle
-                        self._transition_start_angle = float(current_eff)
-                        self._transition_target_angle = float(requested_angle)
-                        delta = abs(float(requested_angle) - float(current_eff))
-                        calc_blocks = max(1, int(np.ceil(delta * self.transition_blocks_per_degree)))
-                        total_blocks = min(self.transition_blocks_max, max(calc_blocks, int(self.crossfade_blocks)))
-                        self._transition_blocks_total = int(total_blocks)
-                        self._transition_blocks_left = int(self._transition_blocks_total)
-                        self._in_transition = True
-                        if current_log_time - self._last_transition_log_time > self._transition_log_interval:
-                            self._last_transition_log_time = current_log_time
-                            if hasattr(self, "logger"):
-                                self.logger.debug(f"[MVDR] Retargeting transition: {self._transition_start_angle:.2f}°→{self._transition_target_angle:.2f}°, blocks={self._transition_blocks_total}")
-                    else:
-                        self._transition_start_angle = float(previous_angle)
-                        self._transition_target_angle = float(requested_angle)
-                        # Compute transition length proportional to angle delta
-                        delta = abs(float(requested_angle) - float(previous_angle))
-                        calc_blocks = max(1, int(np.ceil(delta * self.transition_blocks_per_degree)))
-                        total_blocks = min(self.transition_blocks_max, max(calc_blocks, int(self.crossfade_blocks)))
-                        self._transition_blocks_total = int(total_blocks)
-                        self._transition_blocks_left = int(self._transition_blocks_total)
-                        self._in_transition = True
-                        if current_log_time - self._last_transition_log_time > self._transition_log_interval:
-                            self._last_transition_log_time = current_log_time
-                            if hasattr(self, "logger"):
-                                self.logger.debug(f"[MVDR] Starting transition: delta={delta:.2f}°, blocks={self._transition_blocks_total}")
+                    self._transition_start_angle = float(previous_angle)
+                    self._transition_target_angle = float(requested_angle)
+                    # Compute transition length proportional to angle delta
+                    delta = abs(float(requested_angle) - float(previous_angle))
+                    calc_blocks = max(1, int(np.ceil(delta * self.transition_blocks_per_degree)))
+                    total_blocks = min(self.transition_blocks_max, max(calc_blocks, int(self.crossfade_blocks)))
+                    self._transition_blocks_total = int(total_blocks)
+                    self._transition_blocks_left = int(self._transition_blocks_total)
+                    self._in_transition = True
+                    if current_log_time - self._last_transition_log_time > self._transition_log_interval:
+                        self._last_transition_log_time = current_log_time
+                        if hasattr(self, "logger"):
+                            self.logger.debug(f"[MVDR] Starting transition: delta={delta:.2f}°, blocks={self._transition_blocks_total}")
 
             if (
                 self._transition_blocks_left > 0
@@ -963,7 +1009,26 @@ class MVDRBeamformer(Beamformer):
                     self._transition_blocks_total = 0
                     self._in_transition = False
 
+        # Apply angle-dependent smoothing to reduce side-angle artifacts
+        adj_cov_alpha, adj_alpha_min, adj_alpha_max, adj_alpha_center = self._compute_angle_dependent_alphas(effective_angle)
+        
+        # Save original parameters
+        orig_cov_alpha = self.covariance_alpha
+        orig_alpha_min = self.weight_smooth_alpha_min
+        orig_alpha_max = self.weight_smooth_alpha_max
+        
+        # Temporarily apply adjusted parameters for this block
+        self.covariance_alpha = adj_cov_alpha
+        self.weight_smooth_alpha_min = adj_alpha_min
+        self.weight_smooth_alpha_max = adj_alpha_max
+        
+        # Process with adjusted smoothing
         result = self.process(block, effective_angle)
+        
+        # Restore original parameters for next block
+        self.covariance_alpha = orig_cov_alpha
+        self.weight_smooth_alpha_min = orig_alpha_min
+        self.weight_smooth_alpha_max = orig_alpha_max
         output_arr = np.asarray(result, dtype=np.float64)
         # Keep the last requested angle so the next block can detect changes.
         self._blend_accumulated_angle = 0.0
@@ -988,37 +1053,16 @@ class MVDRBeamformer(Beamformer):
             self._defer_transition_until_prev_weights = False
             # Initialize transition using the stored previous steering angle
             if previous_angle is not None:
-                # If a transition is already running, retarget smoothly from current effective angle
-                if getattr(self, "_in_transition", False) and self._transition_start_angle is not None and self._transition_target_angle is not None and self._transition_blocks_total > 0:
-                    try:
-                        blocks_done = float(self._transition_blocks_total - self._transition_blocks_left)
-                        frac = min(max(blocks_done / float(self._transition_blocks_total), 0.0), 1.0)
-                        eased = 0.5 * (1.0 - np.cos(np.pi * frac))
-                        current_eff = float(self._transition_start_angle) + (float(self._transition_target_angle) - float(self._transition_start_angle)) * eased
-                    except Exception:
-                        current_eff = float(previous_angle)
-
-                    self._transition_start_angle = float(current_eff)
-                    self._transition_target_angle = float(requested_angle)
-                    delta = abs(float(requested_angle) - float(current_eff))
-                    calc_blocks = max(1, int(np.ceil(delta * self.transition_blocks_per_degree)))
-                    total_blocks = min(self.transition_blocks_max, max(calc_blocks, int(self.crossfade_blocks)))
-                    self._transition_blocks_total = int(total_blocks)
-                    self._transition_blocks_left = int(self._transition_blocks_total)
-                    self._in_transition = True
-                    if hasattr(self, "logger"):
-                        self.logger.debug(f"[MVDR] Deferred retargeting: {self._transition_start_angle:.2f}°→{self._transition_target_angle:.2f}°, blocks={self._transition_blocks_total}")
-                else:
-                    delta = abs(float(requested_angle) - float(previous_angle))
-                    calc_blocks = max(1, int(np.ceil(delta * self.transition_blocks_per_degree)))
-                    total_blocks = min(self.transition_blocks_max, max(calc_blocks, int(self.crossfade_blocks)))
-                    self._transition_start_angle = float(previous_angle)
-                    self._transition_target_angle = float(requested_angle)
-                    self._transition_blocks_total = int(total_blocks)
-                    self._transition_blocks_left = int(self._transition_blocks_total)
-                    self._in_transition = True
-                    if hasattr(self, "logger"):
-                        self.logger.debug(f"[MVDR] Deferred transition now starting: delta={delta:.2f}°, blocks={self._transition_blocks_total}")
+                delta = abs(float(requested_angle) - float(previous_angle))
+                calc_blocks = max(1, int(np.ceil(delta * self.transition_blocks_per_degree)))
+                total_blocks = min(self.transition_blocks_max, max(calc_blocks, int(self.crossfade_blocks)))
+                self._transition_start_angle = float(previous_angle)
+                self._transition_target_angle = float(requested_angle)
+                self._transition_blocks_total = int(total_blocks)
+                self._transition_blocks_left = int(self._transition_blocks_total)
+                self._in_transition = True
+                if hasattr(self, "logger"):
+                    self.logger.debug(f"[MVDR] Deferred transition now starting: delta={delta:.2f}°, blocks={self._transition_blocks_total}")
 
         # Update timing metric
         beam_time_ms = (time.perf_counter() - beam_start) * 1000.0
