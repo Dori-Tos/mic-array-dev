@@ -265,16 +265,6 @@ def test_free_beam(
             mic_channel_numbers=mic_channel_numbers,
             sample_rate=sample_rate,
             mic_positions_m=mic_positions,
-            covariance_alpha=0.95,
-            diagonal_loading=0.15,
-            spectral_whitening_factor=0.12,
-            weight_smooth_alpha=0.72,
-            max_adaptive_loading_scale=4.0,
-            coherence_suppression_strength=0.8,
-            weight_smooth_alpha_min=0.45,
-            weight_smooth_alpha_max=0.82,
-            snr_threshold_for_sharpening=2.0,
-            backward_null_strength=0.9,
         )
         
         das_beamformer=DASBeamformer(
@@ -286,14 +276,8 @@ def test_free_beam(
 
         doa_estimator = IterativeDOAEstimator(
             logger=logger,
-            update_rate=3.0,
-            angle_range=(-25.0, 25.0),
             doa_beamformer=das_beamformer,
             beamformer=beamformer,
-            scan_step_deg=3.0,
-            smooth_step_deg=1.0,
-            local_search_radius_deg=9.0,
-            periodic_full_scan_blocks=20,
         )
         
         # Filters (same config as test_pipeline.py)
@@ -301,9 +285,6 @@ def test_free_beam(
             BandPassFilter(
                 logger=logger,
                 sample_rate=sample_rate,
-                low_cutoff=300.0,
-                high_cutoff=4000.0,
-                order=4
             ),
         ]
 
@@ -312,11 +293,6 @@ def test_free_beam(
                 SpectralSubtractionFilter(
                     logger=logger,
                     sample_rate=sample_rate,
-                    noise_factor=0.65,
-                    gain_floor=0.55,  # Updated from 0.35 (prevents over-suppression of low freqs)
-                    noise_alpha=0.995,
-                    noise_update_snr_db=8.0,
-                    gain_smooth_alpha=0.92,
                 )
             )
         
@@ -324,27 +300,11 @@ def test_free_beam(
         if enable_agc:
             agc = AGCChain(logger=logger, stages=[
                 AdaptiveAmplifier(
-                    logger=logger,
-                    target_rms=0.08,
-                    min_gain=1.0,
-                    max_gain=6.0,  # Updated from 12.0 (prevent oscillation)
-                    adapt_alpha=0.04,
-                    speech_activity_rms=0.00012,
-                    silence_decay_alpha=0.008,
-                    activity_hold_ms=600.0,
-                    peak_protect_threshold=0.30,  # Updated from 0.35
-                    peak_protect_strength=1.0,  # Updated from 0.85 (maximum protection)
-                    max_gain_warn_rms_min=0.001,
+                    logger=logger
                 ),
                 PedalboardAGC(
                     logger=logger,
                     sample_rate=sample_rate,
-                    threshold_db=-20.0,
-                    ratio=2.0,  # Updated from 3.5 (gentler compression)
-                    attack_ms=3.0,
-                    release_ms=140.0,
-                    limiter_threshold_db=-7.0,  # Updated from -1.4 (much lower headroom)
-                    limiter_release_ms=50.0  # Updated from 100.0
                 ),
             ])
         else:

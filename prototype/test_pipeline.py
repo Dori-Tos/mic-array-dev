@@ -125,15 +125,16 @@ def _build_mode_components(
         sample_rate=sample_rate,
         mic_positions_m=mic_positions,
         covariance_alpha = 0.7,
-        diagonal_loading = 0.01,
+        diagonal_loading = 0.001,
         spectral_whitening_factor = 0.3,
-        weight_smooth_alpha = 0.8, 
-        max_adaptive_loading_scale=4.0,
-        coherence_suppression_strength=0.8,
+        weight_smooth_alpha = 0.88, 
+        max_adaptive_loading_scale=8.0,
+        coherence_suppression_strength=0.5,
         weight_smooth_alpha_min=0.45,
         weight_smooth_alpha_max=0.82,
         snr_threshold_for_sharpening=2.0,
-        backward_null_strength=0.8,
+        backward_null_strength=0.6,
+        max_beamform_freq=8000.0,
     )
 
     doa_estimator = IterativeDOAEstimator(
@@ -173,8 +174,8 @@ if __name__ == "__main__":
     
     With 4 mics => Beamforming = 2-3ms | DOA = 0.5-2ms
     With 8 mics => Beamforming = 4-6ms | DOA = 0.5-4ms
-    with 10 mics => Beamforming = 6-8ms | DOA = 0.5-5ms
-    with 14 mics => Beamforming = 8-11ms | DOA = 0.5-7ms
+    with 10 mics => Beamforming = 6-9ms | DOA = 0.5-5ms
+    with 14 mics => Beamforming = 11-14ms | DOA = 0.5-7ms
     
     With eigenvalue suppression and frequency smoothing: +2-4ms
     """
@@ -251,7 +252,7 @@ if __name__ == "__main__":
         logger=filter_logger,
         sample_rate=sample_rate,
         low_cutoff=300.0,
-        high_cutoff=4000.0,
+        high_cutoff=6000.0,
         order=4
     )
     

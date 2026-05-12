@@ -310,7 +310,7 @@ class MVDRBeamformer(Beamformer):
         enable_backward_null_constraint: bool = True,
         backward_null_strength: float = 0.5,
         enable_output_crossfade: bool = True,
-        max_beamform_freq: float = 6000.0,
+        max_beamform_freq: float = 8000.0,
         # Crossfade tuning for handling frequent 1° step updates and DOA pauses
         crossfade_base_samples: int = 16,
         crossfade_min_samples: int = 8,
@@ -396,7 +396,7 @@ class MVDRBeamformer(Beamformer):
         
         # Output-domain IIR smoothing to catch block-boundary discontinuities
         self._iir_state: float = 0.0  # Previous sample for one-pole IIR filter
-        self._output_iir_alpha: float = 0.7  # IIR filter pole; higher = more smoothing, lower = more responsiveness
+        self._output_iir_alpha: float = 0.4  # IIR filter pole; higher = more smoothing (0.7=heavy, 0.4=light, 0.2=minimal)
         
         # Cross-block covariance temporal smoothing to reduce sudden weight jumps
         self._prev_covariance: np.ndarray | None = None  # Store covariance from previous block

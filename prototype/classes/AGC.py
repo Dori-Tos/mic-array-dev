@@ -269,11 +269,11 @@ class NoiseAwareAdaptiveAmplifier:
         min_gain: float = 0.7,
         max_gain_baseline: float = 6.0,
         gain_up_alpha: float = 0.008,
-        gain_down_alpha: float = 0.1,
+        gain_down_alpha: float = 0.15,
         snr_threshold_db: float = 8.0,
         noise_floor_alpha: float = 0.997,
-        activity_hold_ms: float = 200.0,
-        peak_protect_threshold: float = 0.35,
+        activity_hold_ms: float = 100.0,
+        peak_protect_threshold: float = 0.30,
         peak_protect_strength: float = 1.0,
     ):
         if target_rms <= 0:
@@ -848,11 +848,11 @@ class PedalboardAGC:
         self,
         logger: logging.Logger,
         sample_rate: int,
-        threshold_db: float = -30.0,
-        ratio: float = 4.0,
-        attack_ms: float = 10.0,
-        release_ms: float = 100.0,
-        limiter_threshold_db: float = -0.1,
+        threshold_db: float = -20.0,
+        ratio: float = 2.0,
+        attack_ms: float = 3.0,
+        release_ms: float = 140.0,
+        limiter_threshold_db: float = -7.0,
         limiter_release_ms: float = 50.0,
     ):
         """

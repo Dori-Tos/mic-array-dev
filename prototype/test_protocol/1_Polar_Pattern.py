@@ -349,17 +349,6 @@ def test_polar_pattern(
             mic_channel_numbers=mic_channel_numbers,
             sample_rate=sample_rate,
             mic_positions_m=mic_positions,
-            covariance_alpha=0.95,
-            diagonal_loading=0.15,
-            spectral_whitening_factor=0.12,
-            weight_smooth_alpha=0.72,
-            max_adaptive_loading_scale=4.0,
-            coherence_suppression_strength=0.8,
-            weight_smooth_alpha_min=0.45,
-            weight_smooth_alpha_max=0.82,
-            snr_threshold_for_sharpening=2.0,
-            backward_null_strength=0.9,
-            max_beamform_freq=8000.0,
         )
         
         filters: list[object] = [
@@ -377,11 +366,6 @@ def test_polar_pattern(
                 SpectralSubtractionFilter(
                     logger=logger,
                     sample_rate=sample_rate,
-                    noise_factor=0.65,
-                    gain_floor=0.55,
-                    noise_alpha=0.995,
-                    noise_update_snr_db=8.0,
-                    gain_smooth_alpha=0.92,
                 )
             )
         

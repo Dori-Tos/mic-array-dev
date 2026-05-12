@@ -75,7 +75,7 @@ def _build_pipeline(
 	filter_type: str = "spectral",
 	single_mic: bool = False,
 	low_pass_cutoff: float = 300.0,
-	high_pass_cutoff: float = 4000.0,
+	high_pass_cutoff: float = 6000.0,
 	enable_frequency_smoothing: bool = True,
 	frequency_smoothing_strength: float = 0.3,
 	enable_eigenvalue_suppression: bool = True,

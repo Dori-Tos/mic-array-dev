@@ -118,7 +118,7 @@ class BandPassFilter(Filter):
     :param order: Filter order (default: 4). Higher order means steeper rolloff but more computational load.
     """
     
-    def __init__(self, logger: logging.Logger, sample_rate: int, low_cutoff: float, high_cutoff: float, order: int = 4):
+    def __init__(self, logger: logging.Logger, sample_rate: int, low_cutoff: float = 300.0, high_cutoff: float = 6000.0, order: int = 4):
         super().__init__(logger, sample_rate, order=order)
         self._validate_cutoff(low_cutoff)
         self._validate_cutoff(high_cutoff)
@@ -190,10 +190,10 @@ class WienerFilter(Filter):
         logger: logging.Logger,
         sample_rate: int,
         noise_alpha: float = 0.985,
-        gain_floor: float = 0.12,
-        gain_smooth_alpha: float = 0.75,
-        apriori_smooth_alpha: float = 0.98,
-        noise_update_snr_db: float = 8.0,
+        gain_floor: float = 0.08,
+        gain_smooth_alpha: float = 0.92,
+        apriori_smooth_alpha: float = 0.99,
+        noise_update_snr_db: float = 12.00,
         noise_update_rms: float = 8e-4,
     ):
         super().__init__(logger, sample_rate, order=1)
@@ -463,11 +463,11 @@ class SpectralSubtractionFilter(Filter):
         logger: logging.Logger,
         sample_rate: int,
         order: int = 4,
-        noise_factor: float = 0.8,
-        gain_floor: float = 0.3,
-        noise_alpha: float = 0.98,
-        noise_update_snr_db: float = 3.0,
-        gain_smooth_alpha: float = 0.6,
+        noise_factor: float = 0.65,
+        gain_floor: float = 0.55,
+        noise_alpha: float = 0.995,
+        noise_update_snr_db: float = 8.0,
+        gain_smooth_alpha: float = 0.92,
     ):
         super().__init__(logger, sample_rate, order=order)
         
