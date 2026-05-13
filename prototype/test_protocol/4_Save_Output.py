@@ -16,12 +16,9 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 import argparse
-from collections import deque
 import logging
 import sys
-import threading
 import time
-import wave
 
 import numpy as np
 import sounddevice as sd
@@ -29,10 +26,11 @@ import sounddevice as sd
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from classes.AGC import AdaptiveAmplifier, AGCChain, NoiseAwareAdaptiveAmplifier, PedalboardAGC
-from classes.Array_RealTime import apply_realtime_processing_chain
+from classes.Array_RealTime import Array_RealTime
 from classes.Beamformer import DASBeamformer, MVDRBeamformer
 from classes.DOAEstimator import IterativeDOAEstimator
 from classes.Filter import BandPassFilter, SpectralSubtractionFilter, WienerFilter
+from classes.Microphone import Microphone
 
 
 def _resolve_geometry_path(geometry_value: int) -> Path:
@@ -69,7 +67,7 @@ def _safe_dbfs(value: float, floor: float = 1e-10) -> float:
 def _build_pipeline(
 	*,
 	logger: logging.Logger,
-	sample_rate: int,
+	sample_rate: int = 48000,
 	num_mics: int,
 	geometry: int,
 	filter_type: str = "spectral",
@@ -110,23 +108,13 @@ def _build_pipeline(
 			mic_channel_numbers=mic_channel_numbers,
 			sample_rate=sample_rate,
 			mic_positions_m=mic_positions,
-			covariance_alpha=0.95,
-			diagonal_loading=0.15,
-			spectral_whitening_factor=0.12,
-			weight_smooth_alpha=0.72,
-			max_adaptive_loading_scale=4.0,
 			enable_frequency_smoothing=enable_frequency_smoothing,
 			frequency_smoothing_strength=frequency_smoothing_strength,
 			enable_eigenvalue_suppression=enable_eigenvalue_suppression,
 			enable_adaptive_loading=enable_adaptive_loading,
 			enable_weight_smoothing=enable_weight_smoothing,
-			coherence_suppression_strength=0.8,
 			enable_coherence_suppression=enable_coherence_suppression,
-			weight_smooth_alpha_min=0.45,
-			weight_smooth_alpha_max=0.82,
-			snr_threshold_for_sharpening=2.0,
 			enable_backward_null_constraint=enable_backward_null_constraint,
-			backward_null_strength=0.9,
 			enable_output_crossfade=enable_output_crossfade,
 			max_beamform_freq=max_beamform_freq,
 		)
@@ -134,13 +122,8 @@ def _build_pipeline(
 	 
 		doa_estimator = IterativeDOAEstimator(
 			logger=logger,
-			update_rate=3.0,
-			angle_range=(-25.0, 25.0),
 			doa_beamformer=das_beamformer,
 			beamformer=beamformer,
-			scan_step_deg=5.0,
-			local_search_radius_deg=10.0,
-			periodic_full_scan_blocks=20,
 		)
 
 	# Select filter based on filter_type parameter
@@ -148,22 +131,11 @@ def _build_pipeline(
 		denoiser = WienerFilter(
 			logger=logger,
 			sample_rate=sample_rate,
-			noise_alpha=0.985,
-			gain_floor=0.10,
-			gain_smooth_alpha=0.92,
-			apriori_smooth_alpha=0.99,
-			noise_update_snr_db=8.0,
-			noise_update_rms=8e-4,
 		)
 	else:  # default to spectral
 		denoiser = SpectralSubtractionFilter(
 			logger=logger,
 			sample_rate=sample_rate,
-			noise_factor=0.65,
-			gain_floor=0.55,
-			noise_alpha=0.995,
-			noise_update_snr_db=8.0,
-			gain_smooth_alpha=0.92,
 		)
 
 	filters = [
@@ -180,26 +152,10 @@ def _build_pipeline(
 	agc = AGCChain(logger=logger, stages=[
 		NoiseAwareAdaptiveAmplifier(
 			logger=logger,
-			target_rms=0.08,
-			min_gain=0.7,
-			max_gain_baseline=6.0,
-			gain_up_alpha=0.008,
-			gain_down_alpha=0.15,
-			snr_threshold_db=8.0,
-			noise_floor_alpha=0.997,
-			activity_hold_ms=100.0,
-			peak_protect_threshold=0.30,
-			peak_protect_strength=1.0,
 		),
 		PedalboardAGC(
 			logger=logger,
 			sample_rate=sample_rate,
-			threshold_db=-20.0,
-			ratio=2.0,
-			attack_ms=3.0,
-			release_ms=140.0,
-			limiter_threshold_db=-7.0,
-			limiter_release_ms=50.0,
 		),
 	])
 
@@ -209,13 +165,13 @@ def _build_pipeline(
 def run_save_output(
 	device_index: int | None = None,
 	output_dir: str = "data/test_protocol/4_save_output",
-	sample_rate: int | None = None,
+	sample_rate: int | None = 48000,
 	blocksize: int = 960,
-	num_mics: int = 8,
-	geometry: int = 2,
+	num_mics: int = 14,
+	geometry: int = 5,
 	freeze_beamformer: bool = False,
 	freeze_angle_deg: float = 0.0,
-	listen_output: bool = False,
+	listen_output: bool = True,
 	monitor_gain: float = 0.22,
 	warmup_seconds: float = 2.0,
 	warn_size_mb: float = 512.0,
@@ -223,7 +179,7 @@ def run_save_output(
 	filter_type: str = "spectral",
 	single_mic: bool = False,
 	low_pass_cutoff: float = 300.0,
-	high_pass_cutoff: float = 4000.0,
+	high_pass_cutoff: float = 6000.0,
 	enable_frequency_smoothing: bool = True,
 	frequency_smoothing_strength: float = 0.3,
 	enable_eigenvalue_suppression: bool = True,
@@ -232,7 +188,7 @@ def run_save_output(
 	enable_coherence_suppression: bool = True,
 	enable_backward_null_constraint: bool = True,
 	enable_output_crossfade: bool = True,
-	max_beamform_freq_hz: float = 6000.0,
+	max_beamform_freq_hz: float = 8000.0,
 ):
 	output_path = Path(output_dir)
 	output_path.mkdir(parents=True, exist_ok=True)
@@ -258,16 +214,20 @@ def run_save_output(
 	logger = logging.getLogger("SaveOutput")
 	# Configure root logging so all module loggers propagate to the console
 	# Use basicConfig only if the root logger has no handlers yet.
+	log_level = logging.DEBUG if args.debug else logging.INFO
 	if not logging.getLogger().handlers:
 		logging.basicConfig(
-			level=logging.INFO,
+			level=log_level,
 			stream=sys.stdout,
 			format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 		)
-	# Ensure this module logger is set to INFO and will propagate to root handlers
-	logger.setLevel(logging.INFO)
+	# Ensure this module logger is set and will propagate to root handlers
+	logger.setLevel(log_level)
 	logger.propagate = True
+	if log_level == logging.DEBUG:
+		logger.info("DEBUG logging ENABLED - expect verbose output from all pipeline components")
 
+	# Build the pipeline with configured parameters
 	geometry_path, mic_channel_numbers, _mic_positions, beamformer, doa_estimator, filters, agc = _build_pipeline(
 		logger=logger,
 		sample_rate=effective_sample_rate,
@@ -296,7 +256,7 @@ def run_save_output(
 	temp_file = output_path / f"beamformed_output_{ts}.tmp.wav"
 
 	print("\n" + "=" * 72)
-	print("Protocol 4 - Save Processed Output")
+	print("Protocol 4 - Save Processed Output (via Array_RealTime)")
 	print("=" * 72)
 	print(f"  Device: {device_name} (index {device_index})")
 	print(f"  Sample rate: {effective_sample_rate} Hz")
@@ -309,7 +269,7 @@ def run_save_output(
 		print(f"  Pipeline: SINGLE MIC (NO BEAMFORMING) + BandPass + {filter_name}(ON) + AGC(ON)")
 	else:
 		filter_name = "WienerFilter" if filter_type.lower() == "wiener" else "SpectralSubtractionFilter"
-		print(f"  Pipeline: MVDR + BandPass + {filter_name}(ON) + AGC(ON)")
+		print(f"  Pipeline: MVDR + BandPass + {filter_name}(ON) + AGC(ON) [via Array_RealTime]")
 	print(f"  Optional MVDR stages: freq_smooth={'ON' if enable_frequency_smoothing else 'OFF'}, "
 		  f"eigen_sup={'ON' if enable_eigenvalue_suppression else 'OFF'}, "
 		  f"adaptive_load={'ON' if enable_adaptive_loading else 'OFF'}, "
@@ -321,9 +281,7 @@ def run_save_output(
 	print(f"  Freeze beamformer: {freeze_beamformer}")
 	if freeze_beamformer:
 		print(f"  Freeze angle: {float(freeze_angle_deg):.1f} deg")
-	print(f"  Listen output: {'ON' if listen_output else 'OFF'}")
-	if listen_output:
-		print(f"  Monitor gain: {monitor_gain:.2f}")
+	print(f"  Monitor gain: {monitor_gain:.2f} (output monitoring disabled)")
 	print(f"  Warning size threshold: {_bytes_to_human(warn_bytes)}")
 	print(f"  Hard stop threshold: {_bytes_to_human(hard_bytes)} (abort without saving)")
 	print(f"  Temporary output: {temp_file}")
@@ -331,141 +289,73 @@ def run_save_output(
 	print("=" * 72)
 	print("Press Ctrl+C to stop and save.")
 
-	bytes_written = 0
-	warned = False
-	save_allowed = True
+	# Create microphone list for Array_RealTime
+	mic_list = [Microphone(logger=logger, channel_number=i, sampling_rate=effective_sample_rate) 
+	            for i in mic_channel_numbers]
+
+	# Instantiate Array_RealTime with "local_save" mode for simultaneous playback + WAV writing
+	array = Array_RealTime(
+		id_vendor=0x2752,
+		id_product=0x0019,
+		logger=logger,
+		mic_list=mic_list,
+		sampling_rate=effective_sample_rate,
+		doa_estimator=doa_estimator if not freeze_beamformer else None,  # None if frozen
+		beamformer=beamformer,
+		echo_canceller=None,
+		filters=filters,
+		agc=agc,
+		codec=None,
+		monitor_gain=monitor_gain,
+		output_mode="local_save",  # ← Enable simultaneous playback + WAV saving
+		save_wav_path=str(temp_file),
+		save_warn_bytes=warn_bytes,
+		save_hard_limit_bytes=hard_bytes,
+		output_boundary_fade_ms=0.0,
+		downsample_rate=None,
+		post_beamforming_block_ms=10.0,
+		initial_silence_duration=warmup_seconds,  # ← WAV writer will respect this for silence at startup
+	)
+
 	interrupted_by_user = False
+	save_allowed = True
 	start_time = time.time()
-	monitor_lock = threading.Lock()
-	monitor_fifo: deque[np.ndarray] = deque()
-	monitor_current = np.zeros(0, dtype=np.float32)
-	monitor_stream = None
-
-	def _monitor_callback(outdata, frames, time_info, status):
-		nonlocal monitor_current
-		if status:
-			pass
-		chunk = np.zeros(frames, dtype=np.float32)
-		write_idx = 0
-		with monitor_lock:
-			while write_idx < frames:
-				if monitor_current.size == 0:
-					if not monitor_fifo:
-						break
-					monitor_current = monitor_fifo.popleft()
-				remaining = frames - write_idx
-				take = min(remaining, monitor_current.size)
-				if take <= 0:
-					break
-				chunk[write_idx:write_idx + take] = monitor_current[:take]
-				monitor_current = monitor_current[take:]
-				write_idx += take
-		outdata[:, 0] = np.clip(chunk * float(monitor_gain), -1.0, 1.0)
-
-	if listen_output:
-		monitor_stream = sd.OutputStream(
-			samplerate=effective_sample_rate,
-			channels=1,
-			dtype="float32",
-			latency="low",
-			blocksize=int(blocksize),
-			callback=_monitor_callback,
-		)
-
-	wav_writer = wave.open(str(temp_file), "wb")
-	wav_writer.setnchannels(1)
-	wav_writer.setsampwidth(2)
-	wav_writer.setframerate(effective_sample_rate)
 
 	try:
-		with sd.InputStream(
-			samplerate=effective_sample_rate,
-			channels=input_channels,
-			device=int(device_index),
-			dtype="float32",
-			blocksize=int(blocksize),
-		) as stream:
-			if monitor_stream is not None:
-				monitor_stream.start()
-			warmup_end = time.time() + max(0.0, float(warmup_seconds))
-
-			while True:
-				block, _overflowed = stream.read(int(blocksize))
-				block = np.asarray(block, dtype=np.float32)
-				
-				# Ensure block is always 2D (samples, channels) for consistent processing
-				if block.ndim == 1:
-					block = block.reshape(-1, 1)
-
-				# Only attempt DOA/beamformer updates if they exist (skip in single-mic mode)
-				if not bool(freeze_beamformer) and doa_estimator is not None and beamformer is not None:
-					try:
-						doa = doa_estimator.estimate_doa(block)
-						# Only update steering angle if it actually changed (avoid redundant updates)
-						if doa is not None and hasattr(beamformer, "set_steering_angle"):
-							current_angle = beamformer.get_steering_angle() if hasattr(beamformer, "get_steering_angle") else None
-							if current_angle is None or not np.isclose(float(doa), float(current_angle), atol=1e-4):
-								beamformer.set_steering_angle(float(doa))
-					except Exception as doa_err:
-						logger.warning(f"DOA update warning: {type(doa_err).__name__}: {doa_err}")
-				elif beamformer is not None and hasattr(beamformer, "set_steering_angle"):
-					current_angle = beamformer.get_steering_angle() if hasattr(beamformer, "get_steering_angle") else None
-					if current_angle is None or not np.isclose(float(freeze_angle_deg), float(current_angle), atol=1e-4):
-						beamformer.set_steering_angle(float(freeze_angle_deg))
-
-				processed = apply_realtime_processing_chain(
-					block=block,
-					beamformer=beamformer,
-					filters=filters,
-					agc=agc,
-					sample_rate=effective_sample_rate,
-					monitor_gain=1.0,
-					theta_deg=None,
-					freeze_beamformer=bool(freeze_beamformer),
-					freeze_angle_deg=float(freeze_angle_deg) if freeze_angle_deg is not None else None,
+		array.start_realtime(blocksize=blocksize)
+		if listen_output:
+			array.start_output_monitoring(blocksize=blocksize)
+		
+		# Monitor WAV writing status in a simple loop
+		last_status_print = time.monotonic()
+		while True:
+			time.sleep(0.5)  # Check status every 500ms
+			
+			save_stats = array.get_save_stats()
+			
+			# Check for hard limit exceeded (set by Array_RealTime in output callback)
+			if save_stats["hard_limit_exceeded"]:
+				print(
+					f"ERROR: hard output limit exceeded ({save_stats['bytes_written_mb']:.1f} MB). "
+					"Aborting and discarding recording."
 				)
-
-				mono = np.asarray(processed, dtype=np.float32).reshape(-1)
-				mono = np.clip(mono, -1.0, 1.0)
-				if listen_output:
-					with monitor_lock:
-						monitor_fifo.append(mono.copy())
-						while len(monitor_fifo) > 12:
-							monitor_fifo.popleft()
-				pcm16 = (mono * 32767.0).astype(np.int16)
-
-				if time.time() < warmup_end:
-					continue
-
-				wav_writer.writeframes(pcm16.tobytes())
-				bytes_written += int(pcm16.nbytes)
-
-				if (not warned) and bytes_written >= warn_bytes:
-					warned = True
-					print(
-						f"WARNING: output is getting large ({_bytes_to_human(bytes_written)}). "
-						f"Hard stop at {_bytes_to_human(hard_bytes)}."
-					)
-
-				if bytes_written >= hard_bytes:
-					print(
-						f"ERROR: hard output limit exceeded ({_bytes_to_human(bytes_written)}). "
-						"Aborting and discarding recording."
-					)
-					save_allowed = False
-					break
+				save_allowed = False
+				break
+			
+			# Periodically print status (every 10 seconds)
+			now = time.monotonic()
+			if (now - last_status_print) >= 10.0:
+				print(f"  Recording: {save_stats['bytes_written_mb']:.1f} MB so far...")
+				last_status_print = now
 
 	except KeyboardInterrupt:
 		interrupted_by_user = True
 		print("\nCtrl+C received. Finalizing output...")
 	finally:
-		if monitor_stream is not None:
-			try:
-				monitor_stream.stop()
-				monitor_stream.close()
-			except Exception:
-				pass
-		wav_writer.close()
+		try:
+			array.stop_realtime()
+		except Exception as e:
+			logger.warning(f"Error stopping Array_RealTime: {e}")
 
 	if not save_allowed:
 		try:
@@ -475,12 +365,18 @@ def run_save_output(
 			print("Recording aborted due to hard size limit. No file saved.")
 		return
 
+	# Verify WAV file exists and get final statistics
+	save_stats = array.get_save_stats()
+	if not temp_file.exists():
+		print("ERROR: WAV file was not created.")
+		return
+
 	temp_file.replace(final_file)
 	elapsed = time.time() - start_time
 	print("\nSaved processed output WAV:")
 	print(f"  File: {final_file}")
 	print(f"  Duration (approx): {elapsed:.1f} s")
-	print(f"  Audio bytes: {_bytes_to_human(bytes_written)}")
+	print(f"  Audio bytes: {_bytes_to_human(save_stats['bytes_written'])}")
 	if not interrupted_by_user:
 		print("  Capture ended normally.")
 
@@ -491,10 +387,11 @@ if __name__ == "__main__":
 	)
 	parser.add_argument("--device", type=int, default=None, help="Input device index (default: system default input)")
 	parser.add_argument("--output", type=str, default="data/test_protocol/4_save_output", help="Output directory")
-	parser.add_argument("--sample-rate", type=int, default=None, help="Override sample rate (Hz)")
+	parser.add_argument("--debug", action="store_true", help="Enable DEBUG level logging to diagnose pipeline issues")
+	parser.add_argument("--sample-rate", type=int, default=48000, help="Override sample rate (Hz)")
 	parser.add_argument("--blocksize", type=int, default=960, help="Input blocksize in samples (default: 960)")
-	parser.add_argument("--num-mics", type=int, default=8, help="Number of input microphones/channels (default: 8)")
-	parser.add_argument("--geometry", type=int, default=2, help="Geometry selector by XML filename prefix (default: 2)")
+	parser.add_argument("--num-mics", type=int, default=14, help="Number of input microphones/channels (default: 8)")
+	parser.add_argument("--geometry", type=int, default=5, help="Geometry selector by XML filename prefix (default: 2)")
 	parser.add_argument("--freeze-beamformer", action=argparse.BooleanOptionalAction, default=False, help="Freeze beamformer steering")
 	parser.add_argument("--freeze-angle", type=float, default=0.0, help="Steering angle when beamformer is frozen")
 	parser.add_argument("--listen-output", action=argparse.BooleanOptionalAction, default=False, help="Play the processed output live while recording")
@@ -505,7 +402,7 @@ if __name__ == "__main__":
 	parser.add_argument("--filter", type=str, default="spectral", choices=["spectral", "wiener"], help="Denoiser filter: spectral (SpectralSubtractionFilter) or wiener (WienerFilter) (default: spectral)")
 	parser.add_argument("--single-mic", action=argparse.BooleanOptionalAction, default=False, help="Use only the first microphone (no beamforming/DOA)")
 	parser.add_argument("--low-pass-cutoff", type=float, default=300.0, help="Low passband filter cutoff frequency (Hz)")
-	parser.add_argument("--high-pass-cutoff", type=float, default=4000.0, help="High passband filter cutoff frequency (Hz)")
+	parser.add_argument("--high-pass-cutoff", type=float, default=6000.0, help="High passband filter cutoff frequency (Hz)")
 	parser.add_argument("--no-frequency-smoothing", action="store_true", help="Disable covariance frequency smoothing")
 	parser.add_argument("--frequency-smoothing-strength", type=float, default=0.3, help="Blend factor for covariance frequency smoothing (default: 0.3)")
 	parser.add_argument("--no-eigenvalue-suppression", action="store_true", help="Disable eigenvalue-based diagonal loading boost")

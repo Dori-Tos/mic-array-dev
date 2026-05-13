@@ -30,7 +30,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-PATTERN = 3
+PATTERN = 5
 
 if PATTERN == 1:
     BASE_PATH = Path("Python/Tests/mic-array-dev/data/test_protocol/1_polar_pattern/1_square_70dB")
@@ -90,6 +90,17 @@ elif PATTERN == 4:
         Path("polar_pattern_4500_Hz_60cm_2.csv"),      
         Path("polar_pattern_5000_Hz_60cm_2.csv"),        
         Path("polar_pattern_6000_Hz_60cm_2.csv"),
+    ]
+elif PATTERN == 5:
+    BASE_PATH = Path("Python/Tests/mic-array-dev/data/test_protocol/1_polar_pattern/5_max_rim_70dB")
+    DEFAULT_FILES = [
+        Path("polar_pattern_300_Hz_phase.csv"),
+        Path("polar_pattern_1000_Hz_phase.csv"),
+        Path("polar_pattern_2000_Hz_phase.csv"),
+        Path("polar_pattern_3000_Hz_phase.csv"),
+        Path("polar_pattern_4000_Hz_phase.csv"),
+        Path("polar_pattern_5000_Hz_phase.csv"),
+        Path("polar_pattern_6000_Hz_phase.csv"),
     ]
 
 ANGLES = [0, 180]

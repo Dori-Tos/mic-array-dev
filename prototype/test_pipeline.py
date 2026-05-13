@@ -365,10 +365,10 @@ if __name__ == "__main__":
         codec=mode_cfg["codec"],
         monitor_gain=monitor_gain,
         output_mode=output_mode,
-        output_boundary_fade_ms=0.0,  # Disabled: not the right fix. Real solution is beamformer stability.
+        output_boundary_fade_ms=0.0,
         downsample_rate=downsample_rate,
         post_beamforming_block_ms=post_beamforming_block_ms,
-        initial_silence_duration=2.0,  # Silence period for baseline learning (filter protects against corruption during onset)
+        initial_silence_duration=2.0,
     )
 
     array.start_realtime(blocksize=blocksize)

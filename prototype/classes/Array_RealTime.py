@@ -6,6 +6,7 @@ import sounddevice as sd
 import threading
 import queue
 import logging
+import wave
 
 from scipy import signal
 from collections import deque
@@ -103,31 +104,69 @@ def apply_realtime_processing_chain(
 def _ms_to_samples(sample_rate: int, duration_ms: float) -> int:
     return int(max(1, round((float(sample_rate) * float(duration_ms)) / 1000.0)))
 
+
+def list_available_audio_devices() -> None:
+    """
+    Print a list of all available audio devices and their input channel counts.
+    Useful for diagnosing "Invalid number of channels" errors.
+    """
+    print("\n" + "="*80)
+    print("AVAILABLE AUDIO DEVICES")
+    print("="*80)
+    try:
+        devices = sd.query_devices()
+        if isinstance(devices, dict):
+            devices = [devices]
+        
+        for i, dev in enumerate(devices):
+            in_chans = dev.get("max_input_channels", 0)
+            out_chans = dev.get("max_output_channels", 0)
+            sr = dev.get("default_samplerate", 0)
+            print(f"  [{i:2d}] {dev['name']:<40} | Input: {in_chans:2d}ch | Output: {out_chans:2d}ch | SR: {int(sr):5d}Hz")
+        
+        default_dev = sd.default.device
+        if isinstance(default_dev, (list, tuple)):
+            in_dev, out_dev = default_dev
+        else:
+            in_dev = out_dev = default_dev
+        
+        print(f"\nDefault input device: [{in_dev}]")
+        print(f"Default output device: [{out_dev}]")
+    except Exception as e:
+        print(f"Error querying audio devices: {e}")
+    print("="*80 + "\n")
+
 class Array_RealTime(Array):    
     """
     Real-time audio processing array class that extends the base Array with real-time capabilities.
     
     :param logger: logging.Logger instance for logging messages.
-    :param monitor_gain: Gain factor applied to the beamformed output for monitoring through speakers (default: 0.35).
+    :param monitor_gain: Gain factor applied to the beamformed output for monitoring through speakers (default: 0.5).
     :param downsample_rate: If set, downsample the input audio to this rate for processing
         (e.g., 16000 Hz) to reduce computational load. The original sample rate is restored after processing.
+    :param output_boundary_fade_ms: Duration in milliseconds for fading in/out the output at the start/end of the stream to avoid clicks (default: 8 ms).
     :param initial_silence_duration: Duration in seconds to silence output at startup while filters adapt (default: 2.0).
         Set to 0 to disable. Filters often need 1-3 seconds to stabilize before sound quality is good.
     :param post_beamforming_block_ms: Optional smaller block size, in milliseconds, used after beamforming.
         The value must cleanly divide the beamforming block duration and must be at least 5 ms.
         Example: if the beamforming block is 20 ms, valid values are 10 ms and 5 ms.
     :param post_beamforming_min_block_ms: Minimum allowed post-beamforming block size in milliseconds.
+    :param output_mode: "local" (default) for local playback, "codec" for output through a codec stream, or "local_save" for simultaneous local playback and WAV file saving.
     """ 
     
     def __init__(self, *args, 
             logger: logging.Logger, 
-            monitor_gain: float = 0.35, 
+            monitor_gain: float = 0.5, 
             output_mode: str = "local",
-            output_boundary_fade_ms: float = 8.0,
+            output_boundary_fade_ms: float = 0.0,
             downsample_rate: int | None = None, 
             post_beamforming_block_ms: float | None = None,
             post_beamforming_min_block_ms: float = 5.0,
-            initial_silence_duration: float = 2.0, **kwargs
+            initial_silence_duration: float = 2.0,
+            save_wav_path: str | None = None,
+            save_warn_bytes: int | None = None,
+            save_hard_limit_bytes: int | None = None,
+            **kwargs
         ):
         
         super().__init__(*args, logger=logger, **kwargs)
@@ -138,8 +177,21 @@ class Array_RealTime(Array):
         
         self.monitor_gain = monitor_gain
         self.output_mode = str(output_mode).strip().lower()
-        if self.output_mode not in ("local", "codec"):
-            raise ValueError("output_mode must be 'local' or 'codec'")
+        if self.output_mode not in ("local", "codec", "local_save"):
+            raise ValueError("output_mode must be 'local', 'codec', or 'local_save'")
+        
+        # WAV save configuration (for "local_save" mode)
+        self.save_wav_path = save_wav_path
+        self.save_warn_bytes = save_warn_bytes
+        self.save_hard_limit_bytes = save_hard_limit_bytes
+        self._wav_writer = None
+        self._wav_bytes_written = 0
+        self._wav_warn_triggered = False
+        self._wav_hard_limit_exceeded = False
+        self._wav_queue = queue.Queue(maxsize=256)
+        self._wav_stop_event = threading.Event()
+        self._wav_writer_thread = None
+        self._wav_write_error = None
         self.downsample_rate = downsample_rate  # Downsample to this rate (e.g., 16000 Hz)
         self.initial_silence_duration = float(initial_silence_duration)  # Silence duration (sec) at startup
         self.post_beamforming_block_ms = None if post_beamforming_block_ms is None else float(post_beamforming_block_ms)
@@ -350,6 +402,64 @@ class Array_RealTime(Array):
         self._processing_thread.start()
         self.logger.debug("Processing thread started")
 
+        # Validate device and channel count before opening stream
+        try:
+            device_index = self.device_index
+            if device_index is None:
+                default_device = sd.default.device
+                if isinstance(default_device, (list, tuple)):
+                    device_index = default_device[0]
+                else:
+                    device_index = default_device
+            device_info = sd.query_devices(device_index, kind="input")
+            if not isinstance(device_info, dict):
+                raise ValueError(
+                    f"Unable to resolve a concrete input device for index {device_index!r}. "
+                    f"sounddevice returned {type(device_info).__name__} instead of a device record."
+                )
+            max_input_channels = int(device_info.get("max_input_channels", 0))
+            requested_channels = len(self.mic_list)
+            
+            self.logger.info(
+                f"Audio device: '{device_info['name']}' (index {device_index}) - "
+                f"Max input channels: {max_input_channels}, Requested: {requested_channels}"
+            )
+            
+            if requested_channels > max_input_channels:
+                list_available_audio_devices()
+                raise ValueError(
+                    f"Device '{device_info['name']}' (index {device_index}) supports only {max_input_channels} input channels, "
+                    f"but {requested_channels} microphones/channels requested. "
+                    f"To fix: (1) Verify the audio device is connected, "
+                    f"(2) Check that it supports {requested_channels} input channels, or "
+                    f"(3) Use a device index with more channels (see available devices above)."
+                )
+        except Exception as device_check_err:
+            self.logger.error(f"Device validation error: {device_check_err}")
+            raise
+
+        # Initialize WAV writer if in "local_save" mode
+        if self.output_mode == "local_save" and self.save_wav_path is not None:
+            try:
+                import pathlib
+                wav_path = pathlib.Path(self.save_wav_path)
+                wav_path.parent.mkdir(parents=True, exist_ok=True)
+                self._wav_writer = wave.open(str(wav_path), "wb")
+                self._wav_writer.setnchannels(1)  # Mono output
+                self._wav_writer.setsampwidth(2)  # 16-bit
+                self._wav_writer.setframerate(self._output_playback_rate)
+                self._wav_bytes_written = 0
+                self._wav_warn_triggered = False
+                self._wav_hard_limit_exceeded = False
+                self._wav_write_error = None
+                self._wav_stop_event.clear()
+                self._wav_writer_thread = threading.Thread(target=self._wav_writer_loop, daemon=True)
+                self._wav_writer_thread.start()
+                self.logger.info(f"WAV file opened for writing: {wav_path}")
+            except Exception as e:
+                self.logger.error(f"Failed to open WAV file for 'local_save' mode: {e}")
+                self._wav_writer = None
+        
         self._stream = sd.InputStream(
             samplerate=self.sampling_rate,
             channels=len(self.mic_list),
@@ -454,13 +564,6 @@ class Array_RealTime(Array):
         if target_samples <= 0:
             raise ValueError("post_beamforming_block_ms resolved to zero samples")
 
-        ratio = block_sample_count / float(target_samples)
-        if abs(ratio - round(ratio)) > 1e-6:
-            raise ValueError(
-                f"post_beamforming_block_ms ({target_ms:g} ms) must cleanly divide the beamforming block duration ({block_ms:.3f} ms). "
-                f"Use a divisor such as 10 ms or 5 ms for a 20 ms beamforming block."
-            )
-
         return int(target_samples)
 
     def _process_post_beamforming_block(self, mono_block: np.ndarray, sample_rate: int) -> np.ndarray:
@@ -508,6 +611,16 @@ class Array_RealTime(Array):
 
         self.logger.info("Stopping realtime audio processing")
         self.stop_output_monitoring()
+        
+        # Close WAV writer if active
+        if self._wav_writer is not None:
+            try:
+                self._wav_writer.close()
+                self.logger.info(f"[WAV] File closed. Total bytes written: {self._wav_bytes_written / (1024*1024):.1f} MB")
+            except Exception as e:
+                self.logger.warning(f"[WAV] Error closing file: {e}")
+            self._wav_writer = None
+        
         self._processing_stop_event.set()
         
         if self._stream is not None:
@@ -515,6 +628,13 @@ class Array_RealTime(Array):
             self._stream.close()
             self._stream = None
             self.logger.debug("Audio stream stopped and closed")
+
+        self._wav_stop_event.set()
+        if self._wav_writer_thread is not None:
+            self.logger.debug("Waiting for WAV writer thread to join...")
+            self._wav_writer_thread.join(timeout=2.0)
+            self._wav_writer_thread = None
+            self.logger.debug("WAV writer thread joined")
         
         if self._processing_thread is not None:
             self.logger.debug("Waiting for processing thread to join...")
@@ -1008,6 +1128,22 @@ class Array_RealTime(Array):
                 return None
             return self._latest_beamformed.copy()
 
+    def get_save_stats(self) -> dict:
+        """
+        Get WAV save statistics (bytes written, warn status, hard limit status).
+        Only meaningful when output_mode="local_save".
+        """
+        return {
+            "output_mode": self.output_mode,
+            "save_wav_path": self.save_wav_path,
+            "bytes_written": self._wav_bytes_written,
+            "bytes_written_mb": self._wav_bytes_written / (1024 * 1024),
+            "warn_threshold_bytes": self.save_warn_bytes,
+            "hard_limit_bytes": self.save_hard_limit_bytes,
+            "warn_triggered": self._wav_warn_triggered,
+            "hard_limit_exceeded": self._wav_hard_limit_exceeded,
+        }
+
     def get_side_door_measurement_stats(self) -> dict:
         """Get the current live measurement statistics without copying audio buffers."""
         return self.get_side_door_measurement_snapshot(reset=False)
@@ -1199,3 +1335,54 @@ class Array_RealTime(Array):
                 self._adapt_log_state["setup_logged"] = True
 
         outdata[:, 0] = np.clip(chunk, -1.0, 1.0)
+
+        # Write to WAV file if in "local_save" mode
+        if self.output_mode == "local_save" and self._wav_writer is not None:
+            try:
+                chunk_clipped = np.clip(chunk, -1.0, 1.0)
+                pcm16 = (chunk_clipped * 32767.0).astype(np.int16)
+                if not self._wav_stop_event.is_set():
+                    try:
+                        self._wav_queue.put_nowait(pcm16.copy())
+                    except queue.Full:
+                        self.logger.warning("[WAV] Writer queue full, dropping audio block")
+            except Exception as wav_err:
+                self.logger.warning(f"[WAV] Write error: {wav_err}")
+                self._wav_writer = None
+
+    def _wav_writer_loop(self):
+        """Background WAV writer loop so the audio callback never blocks on file I/O."""
+        while True:
+            if self._wav_stop_event.is_set() and self._wav_queue.empty():
+                break
+
+            try:
+                pcm16 = self._wav_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+
+            if self._wav_writer is None:
+                continue
+
+            try:
+                self._wav_writer.writeframes(pcm16.tobytes())
+                self._wav_bytes_written += int(pcm16.nbytes)
+
+                if (not self._wav_warn_triggered) and self.save_warn_bytes is not None:
+                    if self._wav_bytes_written >= self.save_warn_bytes:
+                        self._wav_warn_triggered = True
+                        self.logger.warning(
+                            f"[WAV] Warning threshold exceeded: {self._wav_bytes_written / (1024*1024):.1f} MB. "
+                            f"Hard limit: {self.save_hard_limit_bytes / (1024*1024) if self.save_hard_limit_bytes else 'none':.1f} MB"
+                        )
+
+                if (not self._wav_hard_limit_exceeded) and self.save_hard_limit_bytes is not None:
+                    if self._wav_bytes_written >= self.save_hard_limit_bytes:
+                        self._wav_hard_limit_exceeded = True
+                        self.logger.error(
+                            f"[WAV] HARD LIMIT EXCEEDED: {self._wav_bytes_written / (1024*1024):.1f} MB"
+                        )
+            except Exception as wav_err:
+                self._wav_write_error = wav_err
+                self.logger.warning(f"[WAV] Background write error: {wav_err}")
+                break

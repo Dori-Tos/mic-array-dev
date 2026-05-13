@@ -30,6 +30,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FormatStrFormatter
 
 
 @dataclass(frozen=True)
@@ -129,6 +130,7 @@ def plot_gain_vs_angle(
 	split_plots: bool = False,
 	polar_min: float | None = None,
 	title: str | None = None,
+	real_angles: list[float] | None = None,
 	save_path: Path | None = None,
 	show: bool = True,
 ):
@@ -192,6 +194,25 @@ def plot_gain_vs_angle(
 		ax_gain.set_theta_direction(-1)
 		ax_gain.grid(True, alpha=0.3)
 		ax_gain.set_rlabel_position(135)
+		
+		# Set radial ticks to 5dB increments
+		try:
+			data_min_db = float(np.floor(np.nanmin(gains_closed)))
+			if not np.isfinite(data_min_db):
+				data_min_db = -20.0
+			# Round down to nearest 5 dB
+			db_floor = int(5 * np.floor(data_min_db / 5.0))
+			# Create ticks from db_floor to just below 0
+			db_ticks = np.arange(db_floor, 1, 5)
+			if len(db_ticks) > 0:
+				# Set radial limits and ticks
+				ax_gain.set_ylim((db_floor, 0))
+				ax_gain.set_yticks(db_ticks)
+				ax_gain.yaxis.set_major_formatter(FormatStrFormatter('%d'))
+		except Exception:
+			pass  # Silently ignore if setting ticks fails
+		
+		ax_gain.grid(True, alpha=0.3)
 
 		if doa is None or not np.isfinite(doa).any():
 			raise ValueError(
@@ -214,9 +235,11 @@ def plot_gain_vs_angle(
 			# Line plot across measured angles including the duplicated 360° point
 			x_line = np.concatenate([x_pos, [x_dup]])
 			y_line = np.concatenate([doa, [y_dup]])
-			ax_doa.plot(x_line, y_line, marker=None, linewidth=1.5, color="tab:orange")
-			# Plot markers including the duplicated endpoint so 360° is visible
-			ax_doa.plot(x_line, y_line, marker="o", linestyle="", color="tab:orange")
+			ax_doa.plot(x_line, y_line, marker="o", linewidth=1.5, color="tab:orange", label="Estimated DOA")
+			# Plot real angles if provided as dotted reference line
+			if real_angles is not None and len(real_angles) == n:
+				real_closed = np.concatenate([real_angles, [real_angles[zero_idx]]])
+				ax_doa.plot(x_line, real_closed, linewidth=2.0, color="tab:green", linestyle="--", label="Ideal Performance")
 			# Build xticks: labels are measured angles with an extra 360° label at the end
 			tick_positions = list(x_pos) + [x_dup]
 			tick_labels = [str(int(a)) for a in angles] + ["360"]
@@ -224,13 +247,18 @@ def plot_gain_vs_angle(
 			ax_doa.set_xticklabels(tick_labels)
 		else:
 			# No 0° measurement: simple evenly-spaced line/markers and angle ticks
-			ax_doa.plot(x_pos, doa, marker="o", linewidth=1.5, color="tab:orange")
+			ax_doa.plot(x_pos, doa, marker="o", linewidth=1.5, color="tab:orange", label="Estimated DOA")
+			# Plot real angles if provided as dotted reference line
+			if real_angles is not None and len(real_angles) == n:
+				ax_doa.plot(x_pos, real_angles, linewidth=2.0, color="tab:green", linestyle="--", label="Ideal Performance")
 			ax_doa.set_xticks(x_pos)
 			ax_doa.set_xticklabels([str(int(a)) for a in angles])
 		ax_doa.set_xlabel("Signal Angle (deg)")
 		ax_doa.set_ylabel("Estimated Angle (deg)")
 		ax_doa.set_title("DOA estimation vs Real Angle")
 		ax_doa.grid(True, alpha=0.3)
+		if real_angles is not None and len(real_angles) == n:
+			ax_doa.legend(loc="upper right")
 		# Set x-limits to cover all positions (including duplicated 360 marker)
 		ax_doa.set_xlim(-0.5, n + 0.5)
 		ax_doa.set_ylim(-30, 30)
@@ -378,10 +406,10 @@ def main(argv: list[str] | None = None) -> int:
 		help="In angle mode, show gain on a polar plot and DOA on a separate x-y plot",
 	)
 	parser.add_argument(
-		"--polar-min",
-		type=float,
+		"--real-angles",
+		type=str,
 		default=None,
-		help="Minimum radial value for the polar gain plot (use to 'dezoom')",
+		help="Comma-separated real angle values for DOA plot (e.g., '0,-15,-25,-25,-25,0,25,25,25,15,0')",
 	)
 	parser.add_argument("--title", type=str, default=None, help="Optional plot title")
 	parser.add_argument("--no-show", action="store_true", help="Do not show an interactive window")
@@ -423,14 +451,21 @@ def main(argv: list[str] | None = None) -> int:
 	if mode == "angle":
 		if len(csv_paths) != 1:
 			raise ValueError("mode=angle expects exactly 1 CSV")
+		# Parse real angles if provided
+		real_angles = None
+		if args.real_angles is not None:
+			try:
+				real_angles = [float(x.strip()) for x in args.real_angles.split(",")]
+			except ValueError:
+				raise ValueError(f"Invalid real-angles format: {args.real_angles}")
 		plot_gain_vs_angle(
 			csv_paths[0],
 			angle_col=args.angle_col,
 			gain_col=args.gain_col,
 			doa_col="doa_deg",
 			split_plots=bool(args.split_plots),
-			polar_min=args.polar_min,
 			title=args.title,
+			real_angles=real_angles,
 			save_path=out_path,
 			show=show,
 		)

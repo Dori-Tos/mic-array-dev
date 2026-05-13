@@ -746,8 +746,8 @@ if __name__ == '__main__':
     parser.add_argument('--save-on-interrupt', action=argparse.BooleanOptionalAction, default=False,
                         help='Save partial data when interrupted by Ctrl+C (default: disabled)')
     parser.add_argument('--phase-only-beamforming', action='store_true',
-                        help='Use phase-only beamforming (disable amplitude weights) for a more diffuse response pattern
-                        
+                        help='Use phase-only beamforming (disable amplitude weights) for a more diffuse response pattern')
+    
     args = parser.parse_args()
 
     angle_list = _parse_angle_list(args.angles)
